@@ -3,121 +3,90 @@ import math
 import numpy as np
 from scipy.ndimage import gaussian_filter
 
-class Vector3:
-    def __init__(self, x=0, y=0, z=0):
-        self.x = x
-        self.y = y
-        self.z = z
-
-    def __add__(self, other):
-        return Vector3(self.x + other.x, self.y + other.y, self.z + other.z)
-
-    def __sub__(self, other):
-        return Vector3(self.x - other.x, self.y - other.y, self.z - other.z)
-
-    def __mul__(self, scalar):
-        return Vector3(self.x * scalar, self.y * scalar, self.z * scalar)
-
-    def __truediv__(self, scalar):
-        return self * (1 / scalar)
-
-    def dot(self, other):
-        return self.x * other.x + self.y * other.y + self.z * other.z
-
-    def cross(self, other):
-        return Vector3(
-            self.y * other.z - self.z * other.y,
-            self.z * other.x - self.x * other.z,
-            self.x * other.y - self.y * other.x
-        )
-
-    def magnitude(self):
-        return math.sqrt(self.dot(self))
-
-    def normalize(self):
-        mag = self.magnitude()
-        if mag == 0:
-            return Vector3()
-        return self / mag
-
 class Quaternion:
     def __init__(self, w=1, x=0, y=0, z=0):
-        self.w = w
-        self.x = x
-        self.y = y
-        self.z = z
+        self.arr = np.array([w, x, y, z], dtype=float)
+
+    @property
+    def w(self):
+        return self.arr[0]
+
+    @property
+    def x(self):
+        return self.arr[1]
+
+    @property
+    def y(self):
+        return self.arr[2]
+
+    @property
+    def z(self):
+        return self.arr[3]
 
     def multiply(self, other):
-        w = self.w * other.w - self.x * other.x - self.y * other.y - self.z * other.z
-        x = self.w * other.x + self.x * other.w + self.y * other.z - self.z * other.y
-        y = self.w * other.y - self.x * other.z + self.y * other.w + self.z * other.x
-        z = self.w * other.z + self.x * other.y - self.y * other.x + self.z * other.w
+        a = self.arr
+        b = other.arr
+        w = a[0] * b[0] - a[1] * b[1] - a[2] * b[2] - a[3] * b[3]
+        x = a[0] * b[1] + a[1] * b[0] + a[2] * b[3] - a[3] * b[2]
+        y = a[0] * b[2] - a[1] * b[3] + a[2] * b[0] + a[3] * b[1]
+        z = a[0] * b[3] + a[1] * b[2] - a[2] * b[1] + a[3] * b[0]
         return Quaternion(w, x, y, z)
 
     def conjugate(self):
         return Quaternion(self.w, -self.x, -self.y, -self.z)
 
     def rotate(self, v):
-        qv = Quaternion(0, v.x, v.y, v.z)
+        qv = Quaternion(0, v[0], v[1], v[2])
         res = self.multiply(qv).multiply(self.conjugate())
-        return Vector3(res.x, res.y, res.z)
+        return np.array([res.x, res.y, res.z])
 
     def from_axis_angle(self, axis, angle):
         s = math.sin(angle / 2)
-        self.w = math.cos(angle / 2)
-        self.x = axis.x * s
-        self.y = axis.y * s
-        self.z = axis.z * s
+        self.arr[0] = math.cos(angle / 2)
+        self.arr[1:] = axis * s
 
     def normalize(self):
-        mag = math.sqrt(self.w**2 + self.x**2 + self.y**2 + self.z**2)
+        mag = np.linalg.norm(self.arr)
         if mag > 0:
-            self.w /= mag
-            self.x /= mag
-            self.y /= mag
-            self.z /= mag
+            self.arr /= mag
 
 class RigidBody:
     def __init__(self, mass, inertia):
         self.mass = mass
-        self.inertia = inertia  # Vector3 for principal moments
-        self.pos = Vector3()
+        self.inertia = inertia  # np.array for principal moments
+        self.pos = np.zeros(3)
         self.rot = Quaternion()
-        self.vel = Vector3()
-        self.angvel = Vector3()
-        self.force = Vector3()
-        self.torque = Vector3()
+        self.vel = np.zeros(3)
+        self.angvel = np.zeros(3)
+        self.force = np.zeros(3)
+        self.torque = np.zeros(3)
 
     def apply_force(self, f, at_pos):
-        self.force = self.force + f
+        self.force += f
         rel_pos = at_pos - self.pos
-        torque = rel_pos.cross(f)
-        self.torque = self.torque + torque
+        torque = np.cross(rel_pos, f)
+        self.torque += torque
 
     def update(self, dt):
         # Linear motion
-        accel = self.force * (1 / self.mass)
-        self.vel = self.vel + accel * dt
-        self.pos = self.pos + self.vel * dt
+        accel = self.force / self.mass
+        self.vel += accel * dt
+        self.pos += self.vel * dt
 
         # Angular motion
-        angaccel = Vector3(
-            self.torque.x / self.inertia.x,
-            self.torque.y / self.inertia.y,
-            self.torque.z / self.inertia.z
-        )
-        self.angvel = self.angvel + angaccel * dt
-        if self.angvel.magnitude() > 0:
-            angle = self.angvel.magnitude() * dt
-            axis = self.angvel.normalize()
+        angaccel = self.torque / self.inertia
+        self.angvel += angaccel * dt
+        if np.linalg.norm(self.angvel) > 0:
+            angle = np.linalg.norm(self.angvel) * dt
+            axis = self.angvel / np.linalg.norm(self.angvel)
             dq = Quaternion()
             dq.from_axis_angle(axis, angle)
             self.rot = dq.multiply(self.rot)
             self.rot.normalize()
 
         # Reset accumulators
-        self.force = Vector3()
-        self.torque = Vector3()
+        self.force[:] = 0
+        self.torque[:] = 0
 
 class Wheel:
     def __init__(self, rel_pos, radius, suspension_rest, spring_k, damper_k, is_front, is_driven):
@@ -129,9 +98,11 @@ class Wheel:
         self.is_front = is_front
         self.is_driven = is_driven
         self.steer_angle = 0
+        self.ang_vel = 0  # Angular velocity for spinning
+        self.target_steer = 0  # Target steering angle for smooth transition
 
 class Terrain:
-    def __init__(self, size=200, res=50, height_scale=100, sigma=5):
+    def __init__(self, size=400, res=50, height_scale=100, sigma=5):
         self.size = size
         self.res = res
         self.cell_size = size / (res - 1)
@@ -157,13 +128,14 @@ class Terrain:
         dx = 0.1
         dyx = self.get_height(x + dx, z) - self.get_height(x - dx, z)
         dyz = self.get_height(x, z + dx) - self.get_height(x, z - dx)
-        return Vector3(-dyx / (2 * dx), 1, -dyz / (2 * dx)).normalize()
+        normal = np.array([-dyx / (2 * dx), 1, -dyz / (2 * dx)])
+        return normal / np.linalg.norm(normal)
 
 class Car:
     def __init__(self, terrain):
         self.terrain = terrain
         mass = 1500
-        inertia = Vector3(2000, 3000, 2500)  # Approximate for a car
+        inertia = np.array([2000, 3000, 2500])  # Approximate for a car
         self.body = RigidBody(mass, inertia)
         wheelbase = 2.5
         track = 1.5
@@ -171,45 +143,60 @@ class Car:
         suspension_rest = 0.4
         spring_k = 35000
         damper_k = 3000
-        fl = Wheel(Vector3(-track / 2, -suspension_rest, wheelbase / 2), radius, suspension_rest, spring_k, damper_k, True, False)
-        fr = Wheel(Vector3(track / 2, -suspension_rest, wheelbase / 2), radius, suspension_rest, spring_k, damper_k, True, False)
-        rl = Wheel(Vector3(-track / 2, -suspension_rest, -wheelbase / 2), radius, suspension_rest, spring_k, damper_k, False, True)
-        rr = Wheel(Vector3(track / 2, -suspension_rest, -wheelbase / 2), radius, suspension_rest, spring_k, damper_k, False, True)
+        fl = Wheel(np.array([-track / 2, -suspension_rest, wheelbase / 2]), radius, suspension_rest, spring_k, damper_k, True, False)
+        fr = Wheel(np.array([track / 2, -suspension_rest, wheelbase / 2]), radius, suspension_rest, spring_k, damper_k, True, False)
+        rl = Wheel(np.array([-track / 2, -suspension_rest, -wheelbase / 2]), radius, suspension_rest, spring_k, damper_k, False, True)
+        rr = Wheel(np.array([track / 2, -suspension_rest, -wheelbase / 2]), radius, suspension_rest, spring_k, damper_k, False, True)
         self.wheels = [fl, fr, rl, rr]
         self.steer = 0
         self.accel = 0
         self.brake = 0
+        self.drag_coeff = 0.3  # Drag coefficient
+        self.steer_limit = math.radians(30)  # Normal steering limit (±30 degrees)
 
     def update(self, dt):
-        gravity = Vector3(0, -9.81, 0) * self.body.mass
+        gravity = np.array([0, -9.81, 0]) * self.body.mass
         self.body.apply_force(gravity, self.body.pos)
+
+        # Add wind resistance
+        vel_mag = np.linalg.norm(self.body.vel)
+        if vel_mag > 0:
+            drag_dir = -self.body.vel / vel_mag
+            drag_force = self.drag_coeff * vel_mag**2 * drag_dir
+            self.body.apply_force(drag_force, self.body.pos)
+
         for wheel in self.wheels:
             wheel_world_pos = self.body.pos + self.body.rot.rotate(wheel.rel_pos)
-            if wheel_world_pos.x < 0 or wheel_world_pos.x > self.terrain.size or wheel_world_pos.z < 0 or wheel_world_pos.z > self.terrain.size:
+            if wheel_world_pos[0] < 0 or wheel_world_pos[0] > self.terrain.size or wheel_world_pos[2] < 0 or wheel_world_pos[2] > self.terrain.size:
                 continue
-            ground_h = self.terrain.get_height(wheel_world_pos.x, wheel_world_pos.z)
-            compression = ground_h + wheel.radius - wheel_world_pos.y
+            ground_h = self.terrain.get_height(wheel_world_pos[0], wheel_world_pos[2])
+            compression = ground_h + wheel.radius - wheel_world_pos[1]
             rel_pos = wheel_world_pos - self.body.pos
-            vel_at_wheel = self.body.vel + self.body.angvel.cross(rel_pos)
+            vel_at_wheel = self.body.vel + np.cross(self.body.angvel, rel_pos)
             spring_force = wheel.spring_k * compression
-            damper_force = -wheel.damper_k * vel_at_wheel.y
+            damper_force = -wheel.damper_k * vel_at_wheel[1]
             normal_force = max(0, spring_force + damper_force)
             if normal_force > 0:
-                normal = self.terrain.get_normal(wheel_world_pos.x, wheel_world_pos.z)
+                normal = self.terrain.get_normal(wheel_world_pos[0], wheel_world_pos[2])
                 force_vec = normal * normal_force
                 self.body.apply_force(force_vec, wheel_world_pos)
                 load = normal_force
-                contact_vel = vel_at_wheel - normal * vel_at_wheel.dot(normal)
+                contact_vel = vel_at_wheel - normal * np.dot(vel_at_wheel, normal)
                 if wheel.is_front:
-                    wheel.steer_angle = -self.steer * math.radians(25)
+                    # Smooth steering transition
+                    target_steer = -self.steer * self.steer_limit
+                    wheel.target_steer = max(-self.steer_limit, min(self.steer_limit, target_steer))
+                    wheel.steer_angle += (wheel.target_steer - wheel.steer_angle) * 5 * dt  # Smooth towards target
                 else:
                     wheel.steer_angle = 0
-                local_forward = Vector3(math.sin(wheel.steer_angle), 0, math.cos(wheel.steer_angle))
+                local_forward = np.array([math.sin(wheel.steer_angle), 0, math.cos(wheel.steer_angle)])
                 wheel_forward = self.body.rot.rotate(local_forward)
-                forward_tang = (wheel_forward - normal * wheel_forward.dot(normal)).normalize()
-                right_tang = normal.cross(forward_tang).normalize()
-                long_vel = contact_vel.dot(forward_tang)
-                lat_vel = contact_vel.dot(right_tang)
+                forward_tang = wheel_forward - normal * np.dot(wheel_forward, normal)
+                forward_tang /= np.linalg.norm(forward_tang)
+                right_tang = np.cross(normal, forward_tang)
+                right_tang /= np.linalg.norm(right_tang)
+                long_vel = np.dot(contact_vel, forward_tang)
+                lat_vel = np.dot(contact_vel, right_tang)
                 long_force = 0
                 if wheel.is_driven:
                     long_force += self.accel * 4000
@@ -228,4 +215,13 @@ class Car:
                     lat_force *= scale
                 tire_force = forward_tang * long_force + right_tang * lat_force
                 self.body.apply_force(tire_force, wheel_world_pos)
+                # Update wheel angular velocity with brake effect
+                torque = long_force * wheel.radius if wheel.is_driven and self.accel > 0 else 0
+                wheel_inertia = 10  # Approx kg m^2
+                if self.brake > 0 and abs(long_vel) < 0.1:  # Stop spinning when braked and nearly stationary
+                    wheel.ang_vel = 0
+                else:
+                    slip = (wheel.ang_vel * wheel.radius - long_vel) / (abs(long_vel) + 0.1)
+                    ang_accel = torque / wheel_inertia - slip * 10  # Adjust for slip
+                    wheel.ang_vel += ang_accel * dt
         self.body.update(dt)
