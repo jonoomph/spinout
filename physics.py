@@ -185,9 +185,11 @@ class Car:
                 local_forward = np.array([math.sin(wheel.steer_angle), 0, math.cos(wheel.steer_angle)])
                 wheel_forward = self.body.rot.rotate(local_forward)
                 forward_tang = wheel_forward - normal * np.dot(wheel_forward, normal)
-                forward_tang /= np.linalg.norm(forward_tang)
+                forward_tang_norm = np.linalg.norm(forward_tang)
+                forward_tang = forward_tang / forward_tang_norm if forward_tang_norm > 0 else forward_tang
                 right_tang = np.cross(normal, forward_tang)
-                right_tang /= np.linalg.norm(right_tang)
+                right_tang_norm = np.linalg.norm(right_tang)
+                right_tang = right_tang / right_tang_norm if right_tang_norm > 0 else right_tang
                 long_vel = np.dot(contact_vel, forward_tang)
                 lat_vel = np.dot(contact_vel, right_tang)
                 long_force = 0
@@ -204,7 +206,7 @@ class Car:
                 total_slip_force = math.sqrt(long_force**2 + lat_force**2)
                 # Slip ratio: 0 when stopped or low force, 1 when at friction limit
                 wheel.slip_ratio = 0.0 if abs(long_vel) < 0.1 or total_slip_force < 0.1 * max_fric else min(total_slip_force / max_fric, 1.0) if max_fric > 0 else 0.0
-                if total_slip_force > max_fric:
+                if total_slip_force > max_fric and max_fric > 0:
                     scale = max_fric / total_slip_force
                     long_force *= scale
                     lat_force *= scale

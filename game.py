@@ -1,6 +1,8 @@
 # game.py
 import pygame
 from pygame.locals import *
+import time
+import numpy as np
 from physics import Terrain, Car
 from controls import get_controls
 from hud import render_hud
@@ -8,7 +10,6 @@ from render import RenderContext
 from utils import compute_mvp
 from terrain import build_terrain_vertices
 from car import collect_car_vertices
-import numpy as np
 
 pygame.init()
 width, height = 1920, 1080
@@ -31,6 +32,7 @@ substeps = 2
 wheel_spin_accum = [0.0] * 4
 
 while running:
+    start_time = time.time()
     dt = clock.tick(60) / 1000.0
     if dt > 0.05:
         dt = 0.05
@@ -72,5 +74,10 @@ while running:
     render_ctx.render_hud(hud_surf)
 
     pygame.display.flip()
+
+    # Basic profiling
+    frame_time = time.time() - start_time
+    if frame_time > 0.033:  # Warn if frame time > 33ms (~30 FPS)
+        print(f"Slow frame: {frame_time*1000:.1f}ms")
 
 pygame.quit()
