@@ -1,4 +1,4 @@
-# main.py
+# game.py
 import pygame
 from pygame.locals import *
 import math
@@ -6,12 +6,84 @@ import numpy as np
 from physics import Quaternion, RigidBody, Wheel, Terrain, Car
 from controls import get_controls
 from hud import render_hud
+import moderngl
 
 pygame.init()
-width, height = 1024, 768
-screen = pygame.display.set_mode((width, height))
+width, height = 1920, 1080
+screen = pygame.display.set_mode((width, height), pygame.OPENGL | pygame.DOUBLEBUF)
 pygame.display.set_caption("Simple Car Driving Sim")
 clock = pygame.time.Clock()
+
+ctx = moderngl.create_context()
+
+# 3D shader
+vertex_shader = '''
+#version 330
+in vec3 in_vert;
+in vec4 in_color;
+uniform mat4 mvp;
+out vec4 color;
+void main() {
+    gl_Position = mvp * vec4(in_vert, 1.0);
+    color = in_color;
+}
+'''
+fragment_shader = '''
+#version 330
+in vec4 color;
+out vec4 fragColor;
+void main() {
+    fragColor = color;
+}
+'''
+prog = ctx.program(vertex_shader=vertex_shader, fragment_shader=fragment_shader)
+
+# 2D shader for HUD
+vertex_shader_2d = '''
+#version 330
+in vec2 in_pos;
+in vec2 in_tex;
+out vec2 v_tex;
+uniform mat4 mvp;
+void main() {
+    gl_Position = mvp * vec4(in_pos, 0.0, 1.0);
+    v_tex = in_tex;
+}
+'''
+fragment_shader_2d = '''
+#version 330
+in vec2 v_tex;
+uniform sampler2D tex;
+out vec4 fragColor;
+void main() {
+    fragColor = texture(tex, v_tex);
+}
+'''
+prog2d = ctx.program(vertex_shader=vertex_shader_2d, fragment_shader=fragment_shader_2d)
+
+# Ortho for HUD
+ortho = np.array([
+    [2.0 / width, 0.0, 0.0, 0.0],
+    [0.0, 2.0 / height, 0.0, 0.0],
+    [0.0, 0.0, 1.0, 0.0],
+    [-1.0, -1.0, 0.0, 1.0]
+], dtype='f4')
+
+# HUD quad
+hud_quad_data = np.array([
+    0, 0, 0, 1,
+    width, 0, 1, 1,
+    0, height, 0, 0,
+    width, 0, 1, 1,
+    width, height, 1, 0,
+    0, height, 0, 0,
+], dtype='f4')
+hud_vbo = ctx.buffer(hud_quad_data.tobytes())
+vao2d = ctx.vertex_array(prog2d, hud_vbo, 'in_pos', 'in_tex')
+
+# Enable blend for HUD
+ctx.enable(moderngl.BLEND)
+ctx.blend_func = moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA
 
 terrain = Terrain(size=400)
 car = Car(terrain)
@@ -19,24 +91,47 @@ start_x, start_z = terrain.size / 2, terrain.size / 2
 car.body.pos = np.array([start_x, terrain.get_height(start_x, start_z) + 2, start_z])
 
 fov = 60
-fov_scale = width / 2 / math.tan(math.radians(fov / 2))
+fov_rad = math.radians(fov)
+fov_scale = width / 2 / math.tan(fov_rad / 2)
 
-def project(camera_pos, camera_right, camera_up, camera_forward, p):
-    rel = p - camera_pos
-    dx = np.dot(rel, camera_right)
-    dy = np.dot(rel, camera_up)
-    dz = np.dot(rel, camera_forward)
-    if dz < 0.1:
-        return None
-    sx = dx / dz * fov_scale + width / 2
-    sy = -dy / dz * fov_scale + height / 2
-    return (int(sx), int(sy))
+# Precompute terrain vertices
+terrain_vertices = []
+terrain_color = [34/255, 139/255, 34/255, 1.0]
+for i in range(terrain.res - 1):
+    for j in range(terrain.res - 1):
+        x1 = i * terrain.cell_size
+        z1 = j * terrain.cell_size
+        x2 = (i + 1) * terrain.cell_size
+        z2 = (j + 1) * terrain.cell_size
+        p1 = [x1, terrain.heights[i, j], z1]
+        p2 = [x2, terrain.heights[i + 1, j], z1]
+        p3 = [x2, terrain.heights[i + 1, j + 1], z2]
+        p4 = [x1, terrain.heights[i, j + 1], z2]
+        terrain_vertices.extend(p1 + terrain_color + p2 + terrain_color)
+        terrain_vertices.extend(p2 + terrain_color + p3 + terrain_color)
+        terrain_vertices.extend(p3 + terrain_color + p4 + terrain_color)
+        terrain_vertices.extend(p4 + terrain_color + p1 + terrain_color)
+terrain_vbo = ctx.buffer(np.array(terrain_vertices, dtype='f4').tobytes())
+terrain_vao = ctx.vertex_array(prog, terrain_vbo, 'in_vert', 'in_color')
 
 running = True
 font = pygame.font.SysFont(None, 24)
-view_dist = 150  # Increased slightly for larger terrain/screen
 substeps = 2  # 2x physics steps
 wheel_spin_accum = [0.0] * 4  # Accumulated spin angle per wheel
+
+def quat_to_mat(q):
+    w, x, y, z = q.w, q.x, q.y, q.z
+    mat = np.eye(4, dtype='f4')
+    mat[0,0] = 1 - 2*(y**2 + z**2)
+    mat[0,1] = 2*(x*y - z*w)
+    mat[0,2] = 2*(x*z + y*w)
+    mat[1,0] = 2*(x*y + z*w)
+    mat[1,1] = 1 - 2*(x**2 + z**2)
+    mat[1,2] = 2*(y*z - x*w)
+    mat[2,0] = 2*(x*z - y*w)
+    mat[2,1] = 2*(y*z + x*w)
+    mat[2,2] = 1 - 2*(x**2 + y**2)
+    return mat
 
 while running:
     dt = clock.tick(60) / 1000.0
@@ -55,50 +150,47 @@ while running:
     for _ in range(substeps):
         car.update(sub_dt)
 
-    screen.fill((135, 206, 235))
-
     # Camera setup
     car_dir = car.body.rot.rotate(np.array([0, 0, 1]))
     car_up = car.body.rot.rotate(np.array([0, 1, 0]))
     cam_dist = 8
     cam_height = 2
     camera_pos = car.body.pos - car_dir * cam_dist + np.array([0, cam_height, 0])
-    camera_forward = car.body.pos - camera_pos
+    camera_forward = -(car.body.pos - camera_pos)
     camera_forward /= np.linalg.norm(camera_forward)
     camera_right = np.cross(camera_forward, np.array([0, 1, 0]))
     camera_right /= np.linalg.norm(camera_right)
     camera_up = np.cross(camera_right, camera_forward)
     camera_up /= np.linalg.norm(camera_up)
 
-    # Draw terrain with culling
-    for i in range(terrain.res - 1):
-        for j in range(terrain.res - 1):
-            cell_x = (i + 0.5) * terrain.cell_size
-            cell_z = (j + 0.5) * terrain.cell_size
-            cell_pos = np.array([cell_x, 0, cell_z])
-            dist = np.linalg.norm(cell_pos - camera_pos)
-            if dist > view_dist:
-                continue
-            x1 = i * terrain.cell_size
-            z1 = j * terrain.cell_size
-            x2 = (i + 1) * terrain.cell_size
-            z2 = (j + 1) * terrain.cell_size
-            p1 = np.array([x1, terrain.heights[i, j], z1])
-            p2 = np.array([x2, terrain.heights[i + 1, j], z1])
-            p3 = np.array([x2, terrain.heights[i + 1, j + 1], z2])
-            p4 = np.array([x1, terrain.heights[i, j + 1], z2])
-            pp1 = project(camera_pos, camera_right, camera_up, camera_forward, p1)
-            pp2 = project(camera_pos, camera_right, camera_up, camera_forward, p2)
-            pp3 = project(camera_pos, camera_right, camera_up, camera_forward, p3)
-            pp4 = project(camera_pos, camera_right, camera_up, camera_forward, p4)
-            if pp1 and pp2:
-                pygame.draw.line(screen, (34, 139, 34), pp1, pp2)
-            if pp2 and pp3:
-                pygame.draw.line(screen, (34, 139, 34), pp2, pp3)
-            if pp3 and pp4:
-                pygame.draw.line(screen, (34, 139, 34), pp3, pp4)
-            if pp4 and pp1:
-                pygame.draw.line(screen, (34, 139, 34), pp4, pp1)
+    # View matrix: Extend view_rot to 4x4
+    basis = np.column_stack((camera_right, camera_up, camera_forward))
+    view_rot = np.eye(4, dtype='f4')
+    view_rot[:3, :3] = basis.T  # 3x3 rotation part
+    trans = np.eye(4, dtype='f4')
+    trans[:3, 3] = -camera_pos  # Translation part
+    view = view_rot @ trans
+
+    # Projection matrix (perspective)
+    aspect = width / height
+    near, far = 0.1, 200.0
+    proj = np.zeros((4,4), dtype='f4')
+    proj[0,0] = 1 / (aspect * math.tan(fov_rad / 2))
+    proj[1,1] = 1 / math.tan(fov_rad / 2)
+    proj[2,2] = -(far + near) / (far - near)
+    proj[2,3] = -2 * far * near / (far - near)
+    proj[3,2] = -1
+
+    # Clear screen
+    ctx.clear(135/255, 206/255, 235/255)
+
+    # Render terrain
+    mvp = proj @ view @ np.eye(4, dtype='f4')
+    prog['mvp'].write(mvp.T.tobytes())
+    terrain_vao.render(moderngl.LINES)
+
+    # Collect dynamic vertices
+    dynamic_vertices = []
 
     # Draw car body
     half_length = 1.2
@@ -115,28 +207,29 @@ while running:
         np.array([-half_width, -half_height, -half_length]),
     ]
     world_corners = [car.body.pos + car.body.rot.rotate(c) for c in corners_rel]
-    proj_corners = [project(camera_pos, camera_right, camera_up, camera_forward, p) for p in world_corners]
     edges = [
         (0, 1), (0, 2), (0, 4), (1, 3), (1, 5), (2, 3), (2, 6),
         (3, 7), (4, 5), (4, 6), (5, 7), (6, 7)
     ]
+    car_color = [1.0, 0.0, 0.0, 1.0]
     for a, b in edges:
-        pa, pb = proj_corners[a], proj_corners[b]
-        if pa and pb:
-            pygame.draw.line(screen, (255, 0, 0), pa, pb)
+        pa = world_corners[a]
+        pb = world_corners[b]
+        dynamic_vertices.extend(list(pa) + car_color)
+        dynamic_vertices.extend(list(pb) + car_color)
 
-    # Draw wheels with accurate spinning and suspension shocks
+    # Draw wheels and suspensions
+    black_color = [0.0, 0.0, 0.0, 1.0]
     for idx, wheel in enumerate(car.wheels):
         hub_pos = car.body.pos + car.body.rot.rotate(wheel.rel_pos)
         ground_h = terrain.get_height(hub_pos[0], hub_pos[2])
         compression = ground_h + wheel.radius - hub_pos[1]
-        suspension_length = max(0.1, wheel.suspension_rest - compression)  # Avoid zero length
-        # Color based on compression: Red (short) to Green (tall)
-        compression_ratio = max(0, min(1, compression / wheel.suspension_rest))  # 0 = fully compressed, 1 = no compression
-        r = int(255 * compression_ratio)  # Wait, user said Red=short (compressed), Green=tall (not compressed)
-        g = int(255 * (1 - compression_ratio))
-        b = 0
-        color = (g, r, b)  # Swapped r/g: compressed (low length) = red, uncompressed = green
+        suspension_length = max(0.1, wheel.suspension_rest - compression)
+        compression_ratio = max(0, min(1, compression / wheel.suspension_rest))
+        r = compression_ratio  # Red for compressed
+        g = 1 - compression_ratio  # Green for uncompressed
+        b = 0.0
+        susp_color = [g, r, b, 1.0]
 
         local_steer = wheel.steer_angle
         local_axle = np.array([math.cos(local_steer), 0, -math.sin(local_steer)])
@@ -149,9 +242,9 @@ while running:
         v2 /= np.linalg.norm(v2)
         tire_width = 0.2
         offsets = [-tire_width / 2, tire_width / 2]
-        num_points = 4  # Reduced for perf (square-ish wheel)
+        num_points = 4
         points_lists = []
-        spin_angle = wheel_spin_accum[idx]  # Use accumulated angle
+        spin_angle = wheel_spin_accum[idx]
         cos_spin = math.cos(spin_angle)
         sin_spin = math.sin(spin_angle)
         for offset in offsets:
@@ -160,56 +253,62 @@ while running:
             for i in range(num_points):
                 theta = 2 * math.pi * i / num_points
                 local_point = v1 * math.cos(theta) + v2 * math.sin(theta)
-                # Rotate around axle for spinning
                 rotated_point = local_point * cos_spin - np.cross(axle_dir, local_point) * sin_spin + axle_dir * np.dot(axle_dir, local_point) * (1 - cos_spin)
                 point = offset_pos + rotated_point * wheel.radius
                 points.append(point)
             points_lists.append(points)
-        # Draw circles
         for points in points_lists:
             for i in range(num_points):
-                pp1 = project(camera_pos, camera_right, camera_up, camera_forward, points[i])
-                pp2 = project(camera_pos, camera_right, camera_up, camera_forward, points[(i + 1) % num_points])
-                if pp1 and pp2:
-                    pygame.draw.line(screen, (0, 0, 0), pp1, pp2, 2)
-        # Draw connecting lines
-        connect_indices = [0, num_points // 2]  # Reduced for perf
+                p1 = points[i]
+                p2 = points[(i + 1) % num_points]
+                dynamic_vertices.extend(list(p1) + black_color)
+                dynamic_vertices.extend(list(p2) + black_color)
+        connect_indices = [0, num_points // 2]
         for i in connect_indices:
-            pp1 = project(camera_pos, camera_right, camera_up, camera_forward, points_lists[0][i])
-            pp2 = project(camera_pos, camera_right, camera_up, camera_forward, points_lists[1][i])
-            if pp1 and pp2:
-                pygame.draw.line(screen, (0, 0, 0), pp1, pp2, 2)
-        # Update spin accumulation based on wheel speed
+            p1 = points_lists[0][i]
+            p2 = points_lists[1][i]
+            dynamic_vertices.extend(list(p1) + black_color)
+            dynamic_vertices.extend(list(p2) + black_color)
         wheel_spin_accum[idx] = spin_angle + wheel.ang_vel * dt
 
-        # Draw suspension shock above tire
-        shock_start = hub_pos + car_up * wheel.radius  # Start above hub
-        shock_end = shock_start + car_up * suspension_length  # Upward
-        pp_start = project(camera_pos, camera_right, camera_up, camera_forward, shock_start)
-        pp_end = project(camera_pos, camera_right, camera_up, camera_forward, shock_end)
-        if pp_start and pp_end:
-            pygame.draw.line(screen, color, pp_start, pp_end, 6)  # Thicker (6 px)
+        shock_start = hub_pos + car_up * wheel.radius
+        shock_end = shock_start + car_up * suspension_length
+        dynamic_vertices.extend(list(shock_start) + susp_color)
+        dynamic_vertices.extend(list(shock_end) + susp_color)
 
-    # Draw wind resistance lines from back top vertices
+    # Draw wind resistance lines
     vel_mag = np.linalg.norm(car.body.vel)
     if vel_mag > 5:
         drag_mag = car.drag_coeff * vel_mag**2
         line_length = min(drag_mag / 100, 5)
         rear_top_left = car.body.pos + car.body.rot.rotate(np.array([half_width, half_height, -half_length]))
         rear_top_right = car.body.pos + car.body.rot.rotate(np.array([-half_width, half_height, -half_length]))
+        wind_color = [200/255, 200/255, 255/255, 1.0]
         for start_pos in [rear_top_left, rear_top_right]:
             end_pos = start_pos - car_dir * line_length
-            pp_start = project(camera_pos, camera_right, camera_up, camera_forward, start_pos)
-            pp_end = project(camera_pos, camera_right, camera_up, camera_forward, end_pos)
-            if pp_start and pp_end:
-                pygame.draw.line(screen, (200, 200, 255), pp_start, pp_end, 2)
+            dynamic_vertices.extend(list(start_pos) + wind_color)
+            dynamic_vertices.extend(list(end_pos) + wind_color)
+
+    # Render dynamic
+    if dynamic_vertices:
+        dynamic_vbo = ctx.buffer(np.array(dynamic_vertices, dtype='f4').tobytes())
+        dynamic_vao = ctx.vertex_array(prog, dynamic_vbo, 'in_vert', 'in_color')
+        dynamic_vao.render(moderngl.LINES)
 
     # HUD
     speed_mph = np.linalg.norm(car.body.vel) * 2.23694
     render_fps = clock.get_fps()
     physics_fps = render_fps * substeps
-    steer_angle = car.wheels[0].steer_angle if car.wheels[0].is_front else 0  # Use front-left wheel for steer angle
-    render_hud(screen, font, speed_mph, render_fps, physics_fps, steer_angle)
+    steer_angle = car.wheels[0].steer_angle if car.wheels[0].is_front else 0
+    hud_surf = pygame.Surface((width, height), pygame.SRCALPHA)
+    hud_surf.fill((0, 0, 0, 0))
+    render_hud(hud_surf, font, speed_mph, render_fps, physics_fps, steer_angle)
+    hud_data = pygame.image.tostring(hud_surf, 'RGBA', False)
+    hud_tex = ctx.texture((width, height), 4, hud_data)
+    hud_tex.use(0)
+    prog2d['mvp'].write(ortho.T.tobytes())
+    prog2d['tex'] = 0
+    vao2d.render(moderngl.TRIANGLES)
 
     pygame.display.flip()
 
