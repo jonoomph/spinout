@@ -1,4 +1,4 @@
-mujoco
-mujoco-python-viewer
+numpy
 noise
-Pillow
+scipy
+pygame

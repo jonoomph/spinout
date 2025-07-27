@@ -1,35 +1,12 @@
-############################
 # controls.py
-############################
-import glfw
+from pygame.locals import *
 
-class Controls:
-    def __init__(self, window):
-        self.steer = 0.0
-        self.throttle = 0.0
-        self.brake = False
-        self.zoom = 1.0
-        # register GLFW callbacks
-        glfw.set_key_callback(window, self.key_callback)
-        glfw.set_scroll_callback(window, self.scroll_callback)
-
-    def key_callback(self, window, key, scancode, action, mods):
-        if action in (glfw.PRESS, glfw.REPEAT):
-            if key == glfw.KEY_LEFT:
-                self.steer = -1.0
-            elif key == glfw.KEY_RIGHT:
-                self.steer = 1.0
-            elif key == glfw.KEY_UP:
-                self.throttle = 1.0
-            elif key == glfw.KEY_DOWN:
-                self.brake = True
-        elif action == glfw.RELEASE:
-            if key in (glfw.KEY_LEFT, glfw.KEY_RIGHT):
-                self.steer = 0.0
-            elif key == glfw.KEY_UP:
-                self.throttle = 0.0
-            elif key == glfw.KEY_DOWN:
-                self.brake = False
-
-    def scroll_callback(self, window, xoffset, yoffset):
-        self.zoom *= (1 + yoffset * 0.1)
+def get_controls(keys):
+    steer = 0
+    if keys[K_LEFT]:
+        steer -= 1
+    if keys[K_RIGHT]:
+        steer += 1
+    accel = 1 if keys[K_UP] else 0
+    brake = 1 if keys[K_DOWN] else 0
+    return steer, accel, brake
