@@ -53,7 +53,7 @@ class Quaternion:
 class RigidBody:
     def __init__(self, mass, inertia):
         self.mass = mass
-        self.inertia = inertia  # np.array for principal moments
+        self.inertia = inertia
         self.pos = np.zeros(3)
         self.rot = Quaternion()
         self.vel = np.zeros(3)
@@ -68,12 +68,9 @@ class RigidBody:
         self.torque += torque
 
     def update(self, dt):
-        # Linear motion
         accel = self.force / self.mass
         self.vel += accel * dt
         self.pos += self.vel * dt
-
-        # Angular motion
         angaccel = self.torque / self.inertia
         self.angvel += angaccel * dt
         if np.linalg.norm(self.angvel) > 0:
@@ -83,8 +80,6 @@ class RigidBody:
             dq.from_axis_angle(axis, angle)
             self.rot = dq.multiply(self.rot)
             self.rot.normalize()
-
-        # Reset accumulators
         self.force[:] = 0
         self.torque[:] = 0
 
@@ -98,8 +93,9 @@ class Wheel:
         self.is_front = is_front
         self.is_driven = is_driven
         self.steer_angle = 0
-        self.ang_vel = 0  # Angular velocity for spinning
-        self.target_steer = 0  # Target steering angle for smooth transition
+        self.ang_vel = 0
+        self.target_steer = 0
+        self.slip_ratio = 0.0
 
 class Terrain:
     def __init__(self, size=400, res=50, height_scale=100, sigma=5):
@@ -135,7 +131,7 @@ class Car:
     def __init__(self, terrain):
         self.terrain = terrain
         mass = 1500
-        inertia = np.array([2000, 3000, 2500])  # Approximate for a car
+        inertia = np.array([2000, 3000, 2500])
         self.body = RigidBody(mass, inertia)
         wheelbase = 2.5
         track = 1.5
@@ -151,14 +147,12 @@ class Car:
         self.steer = 0
         self.accel = 0
         self.brake = 0
-        self.drag_coeff = 0.3  # Drag coefficient
-        self.steer_limit = math.radians(30)  # Normal steering limit (±30 degrees)
+        self.drag_coeff = 0.3
+        self.steer_limit = math.radians(30)
 
     def update(self, dt):
         gravity = np.array([0, -9.81, 0]) * self.body.mass
         self.body.apply_force(gravity, self.body.pos)
-
-        # Add wind resistance
         vel_mag = np.linalg.norm(self.body.vel)
         if vel_mag > 0:
             drag_dir = -self.body.vel / vel_mag
@@ -183,10 +177,9 @@ class Car:
                 load = normal_force
                 contact_vel = vel_at_wheel - normal * np.dot(vel_at_wheel, normal)
                 if wheel.is_front:
-                    # Smooth steering transition
                     target_steer = -self.steer * self.steer_limit
                     wheel.target_steer = max(-self.steer_limit, min(self.steer_limit, target_steer))
-                    wheel.steer_angle += (wheel.target_steer - wheel.steer_angle) * 5 * dt  # Smooth towards target
+                    wheel.steer_angle += (wheel.target_steer - wheel.steer_angle) * 5 * dt
                 else:
                     wheel.steer_angle = 0
                 local_forward = np.array([math.sin(wheel.steer_angle), 0, math.cos(wheel.steer_angle)])
@@ -203,25 +196,26 @@ class Car:
                 if self.brake > 0:
                     brake_force = self.brake * 8000
                     long_force -= brake_force * (1 if long_vel > 0 else -1 if long_vel < 0 else 0)
-                C_a = 12000  # Cornering stiffness
+                C_a = 12000
                 alpha = math.atan2(lat_vel, abs(long_vel) + 0.1)
                 lat_force = -C_a * alpha
                 mu = 0.8
                 max_fric = mu * load
                 total_slip_force = math.sqrt(long_force**2 + lat_force**2)
+                # Slip ratio: 0 when stopped or low force, 1 when at friction limit
+                wheel.slip_ratio = 0.0 if abs(long_vel) < 0.1 or total_slip_force < 0.1 * max_fric else min(total_slip_force / max_fric, 1.0) if max_fric > 0 else 0.0
                 if total_slip_force > max_fric:
                     scale = max_fric / total_slip_force
                     long_force *= scale
                     lat_force *= scale
                 tire_force = forward_tang * long_force + right_tang * lat_force
                 self.body.apply_force(tire_force, wheel_world_pos)
-                # Update wheel angular velocity with brake effect
                 torque = long_force * wheel.radius if wheel.is_driven and self.accel > 0 else 0
-                wheel_inertia = 10  # Approx kg m^2
-                if self.brake > 0 and abs(long_vel) < 0.1:  # Stop spinning when braked and nearly stationary
+                wheel_inertia = 10
+                if self.brake > 0 and abs(long_vel) < 0.1:
                     wheel.ang_vel = 0
                 else:
                     slip = (wheel.ang_vel * wheel.radius - long_vel) / (abs(long_vel) + 0.1)
-                    ang_accel = torque / wheel_inertia - slip * 10  # Adjust for slip
+                    ang_accel = torque / wheel_inertia - slip * 10
                     wheel.ang_vel += ang_accel * dt
         self.body.update(dt)
