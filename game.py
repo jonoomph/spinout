@@ -18,7 +18,7 @@ pygame.display.set_caption("Simple Car Driving Sim")
 clock = pygame.time.Clock()
 
 render_ctx = RenderContext(width, height)
-terrain = Terrain(size=400)
+terrain = Terrain(size=800, res=200)
 car = Car(terrain)
 start_x, start_z = terrain.size / 2, terrain.size / 2
 car.body.pos = np.array([start_x, terrain.get_height(start_x, start_z) + 2, start_z])
