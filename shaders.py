@@ -25,9 +25,8 @@ vertex_shader_2d = '''
 in vec2 in_pos;
 in vec2 in_tex;
 out vec2 v_tex;
-uniform mat4 mvp;
 void main() {
-    gl_Position = mvp * vec4(in_pos, 0.0, 1.0);
+    gl_Position = vec4(in_pos * 2.0 - 1.0, 0.0, 1.0); // NDC
     v_tex = in_tex;
 }
 '''
@@ -38,11 +37,18 @@ in vec2 v_tex;
 uniform sampler2D tex;
 out vec4 fragColor;
 void main() {
-    fragColor = texture(tex, v_tex);
+    vec4 color = texture(tex, v_tex);
+    if (color.a < 0.1) discard;
+    fragColor = color;
 }
 '''
 
 def create_shaders(ctx):
-    prog = ctx.program(vertex_shader=vertex_shader, fragment_shader=fragment_shader)
-    prog2d = ctx.program(vertex_shader=vertex_shader_2d, fragment_shader=fragment_shader_2d)
-    return prog, prog2d
+    try:
+        prog = ctx.program(vertex_shader=vertex_shader, fragment_shader=fragment_shader)
+        prog2d = ctx.program(vertex_shader=vertex_shader_2d, fragment_shader=fragment_shader_2d)
+        print("Shaders compiled successfully")
+        return prog, prog2d
+    except Exception as e:
+        print(f"Shader compilation error: {e}")
+        raise

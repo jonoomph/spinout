@@ -13,19 +13,14 @@ class RenderContext:
         self.height = height
         from shaders import create_shaders
         self.prog, self.prog2d = create_shaders(self.ctx)
-        self.ortho = np.array([
-            [2.0 / width, 0.0, 0.0, 0.0],
-            [0.0, 2.0 / height, 0.0, 0.0],
-            [0.0, 0.0, 1.0, 0.0],
-            [-1.0, -1.0, 0.0, 1.0]
-        ], dtype='f4')
+        self.ortho = np.eye(4, dtype='f4')  # Identity for NDC
         hud_quad_data = np.array([
-            0, 0, 0, 1,
-            width, 0, 1, 1,
-            0, height, 0, 0,
-            width, 0, 1, 1,
-            width, height, 1, 0,
-            0, height, 0, 0,
+            0.0, 0.0, 0.0, 0.0,
+            1.0, 0.0, 1.0, 0.0,
+            0.0, 1.0, 0.0, 1.0,
+            1.0, 0.0, 1.0, 0.0,
+            1.0, 1.0, 1.0, 1.0,
+            0.0, 1.0, 0.0, 1.0,
         ], dtype='f4')
         self.hud_vbo = self.ctx.buffer(hud_quad_data.tobytes())
         self.hud_vao = self.ctx.vertex_array(self.prog2d, self.hud_vbo, 'in_pos', 'in_tex')
@@ -35,6 +30,7 @@ class RenderContext:
         self.shock_vao = None
 
     def clear(self):
+        self.ctx.viewport = (0, 0, self.width, self.height)
         self.ctx.clear(135/255, 206/255, 235/255, 1.0, depth=1.0)
 
     def render_terrain(self, terrain_vao, mvp):
@@ -69,14 +65,13 @@ class RenderContext:
             self.shock_vao.render(moderngl.LINES)
 
     def render_hud(self, hud_surf):
-        hud_data = pygame.image.tostring(hud_surf, 'RGBA', False)
-        if len(hud_data) == 0:
-            return
+        self.ctx.viewport = (0, 0, self.width, self.height)
+        hud_data = pygame.image.tostring(hud_surf, 'RGBA', True)
         hud_tex = self.ctx.texture((self.width, self.height), 4, hud_data)
         hud_tex.use(0)
-        self.prog2d['mvp'].write(self.ortho.T.tobytes())
         self.prog2d['tex'] = 0
         self.ctx.disable(moderngl.DEPTH_TEST)
+        self.ctx.enable(moderngl.BLEND)
         self.hud_vao.render(moderngl.TRIANGLES)
         self.ctx.enable(moderngl.DEPTH_TEST)
         hud_tex.release()

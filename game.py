@@ -12,7 +12,7 @@ from terrain import build_terrain_vertices
 from car import collect_car_vertices
 
 pygame.init()
-width, height = 1920, 1080
+width, height = 1854, 1168
 screen = pygame.display.set_mode((width, height), pygame.OPENGL | pygame.DOUBLEBUF)
 pygame.display.set_caption("Simple Car Driving Sim")
 clock = pygame.time.Clock()
@@ -77,7 +77,7 @@ while running:
 
     # Basic profiling
     frame_time = time.time() - start_time
-    if frame_time > 0.033:  # Warn if frame time > 33ms (~30 FPS)
+    if frame_time > 0.033:
         print(f"Slow frame: {frame_time*1000:.1f}ms")
 
 pygame.quit()
