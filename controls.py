@@ -9,4 +9,9 @@ def get_controls(keys):
         steer -= 1
     accel = 1 if keys[K_UP] else 0
     brake = 1 if keys[K_DOWN] else 0
-    return steer, accel, brake
+    car_index = None
+    for i in range(1, 10):
+        if keys[K_1 + i - 1]:
+            car_index = i - 1
+            break
+    return steer, accel, brake, car_index

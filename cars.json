@@ -1,0 +1,248 @@
+[
+  {
+    "category": "economy",
+    "make": "Toyota",
+    "model": "Corolla",
+    "year": 2020,
+    "drive_type": "FWD",
+    "mass_kg": 1339,
+    "inertia_diagonal": [
+      2622.0,
+      2746.0,
+      583.0
+    ],
+    "wheelbase_m": 2.7,
+    "track_m": 1.519,
+    "spring_k_N_per_m": {
+      "front": 27684,
+      "rear": 38100
+    },
+    "damper_k_Ns_per_m": {
+      "front": 1218,
+      "rear": 1426
+    },
+    "drag_coeff": 0.29,
+    "tire": {
+      "width_mm": 205,
+      "aspect_ratio_pct": 55,
+      "rim_diameter_in": 16
+    },
+    "ground_clearance_m": 0.13,
+    "weight_distribution_pct": {
+      "front": 60,
+      "rear": 40
+    },
+    "dimensions_m": {
+      "length": 4.63,
+      "width": 1.78,
+      "height": 1.435
+    },
+    "wheel_radius_m": 0.316,
+    "suspension_rest_m": 0.446
+  },
+  {
+    "category": "mid_size_sedan",
+    "make": "Honda",
+    "model": "Accord",
+    "year": 2020,
+    "drive_type": "FWD",
+    "mass_kg": 1456,
+    "inertia_diagonal": [
+      2871.0,
+      3035.0,
+      743.0
+    ],
+    "wheelbase_m": 2.831,
+    "track_m": 1.607,
+    "spring_k_N_per_m": {
+      "front": 34225,
+      "rear": 38050
+    },
+    "damper_k_Ns_per_m": {
+      "front": 1413,
+      "rear": 1487
+    },
+    "drag_coeff": 0.27,
+    "tire": {
+      "width_mm": 235,
+      "aspect_ratio_pct": 40,
+      "rim_diameter_in": 19
+    },
+    "ground_clearance_m": 0.127,
+    "weight_distribution_pct": {
+      "front": 60.1,
+      "rear": 39.9
+    },
+    "dimensions_m": {
+      "length": 4.88,
+      "width": 1.86,
+      "height": 1.45
+    },
+    "wheel_radius_m": 0.335,
+    "suspension_rest_m": 0.462
+  },
+  {
+    "category": "full_size_sedan",
+    "make": "Toyota",
+    "model": "Avalon",
+    "year": 2020,
+    "drive_type": "FWD",
+    "mass_kg": 1661,
+    "inertia_diagonal": [
+      3311.0,
+      3510.0,
+      830.0
+    ],
+    "wheelbase_m": 2.87,
+    "track_m": 1.585,
+    "spring_k_N_per_m": {
+      "front": 30000,
+      "rear": 35000
+    },
+    "damper_k_Ns_per_m": {
+      "front": 1096,
+      "rear": 1096
+    },
+    "drag_coeff": 0.29,
+    "tire": {
+      "width_mm": 235,
+      "aspect_ratio_pct": 45,
+      "rim_diameter_in": 18
+    },
+    "ground_clearance_m": 0.135,
+    "weight_distribution_pct": {
+      "front": 60,
+      "rear": 40
+    },
+    "dimensions_m": {
+      "length": 4.98,
+      "width": 1.85,
+      "height": 1.435
+    },
+    "wheel_radius_m": 0.334,
+    "suspension_rest_m": 0.469
+  },
+  {
+    "category": "truck",
+    "make": "Ford",
+    "model": "F-150 Lariat",
+    "year": 2020,
+    "drive_type": "RWD",
+    "mass_kg": 2099,
+    "inertia_diagonal": [
+      6249.0,
+      6600.0,
+      1444.0
+    ],
+    "wheelbase_m": 3.983,
+    "track_m": 1.735,
+    "spring_k_N_per_m": {
+      "front": 76000,
+      "rear": 80000
+    },
+    "damper_k_Ns_per_m": {
+      "front": 1187,
+      "rear": 1187
+    },
+    "drag_coeff": 0.37,
+    "tire": {
+      "width_mm": 265,
+      "aspect_ratio_pct": 60,
+      "rim_diameter_in": 18
+    },
+    "ground_clearance_m": 0.218,
+    "weight_distribution_pct": {
+      "front": 50,
+      "rear": 50
+    },
+    "dimensions_m": {
+      "length": 5.89,
+      "width": 2.03,
+      "height": 1.924
+    },
+    "wheel_radius_m": 0.388,
+    "suspension_rest_m": 0.606
+  },
+  {
+    "category": "sports_car",
+    "make": "Ford",
+    "model": "Mustang GT",
+    "year": 2020,
+    "drive_type": "RWD",
+    "mass_kg": 1682,
+    "inertia_diagonal": [
+      3200.0,
+      3400.0,
+      850.0
+    ],
+    "wheelbase_m": 2.72,
+    "track_m": 1.642,
+    "spring_k_N_per_m": {
+      "front": 24000,
+      "rear": 29000
+    },
+    "damper_k_Ns_per_m": {
+      "front": 1585,
+      "rear": 1585
+    },
+    "drag_coeff": 0.42,
+    "tire": {
+      "width_mm": 255,
+      "aspect_ratio_pct": 40,
+      "rim_diameter_in": 19
+    },
+    "ground_clearance_m": 0.144,
+    "weight_distribution_pct": {
+      "front": 53,
+      "rear": 47
+    },
+    "dimensions_m": {
+      "length": 4.78,
+      "width": 1.915,
+      "height": 1.378
+    },
+    "wheel_radius_m": 0.343,
+    "suspension_rest_m": 0.487
+  },
+  {
+    "category": "full_size_SUV",
+    "make": "Chevrolet",
+    "model": "Tahoe",
+    "year": 2020,
+    "drive_type": "RWD",
+    "mass_kg": 2430,
+    "inertia_diagonal": [
+      5116.0,
+      5400.0,
+      1648.0
+    ],
+    "wheelbase_m": 2.946,
+    "track_m": 1.745,
+    "spring_k_N_per_m": {
+      "front": 50000,
+      "rear": 55000
+    },
+    "damper_k_Ns_per_m": {
+      "front": 1832,
+      "rear": 1832
+    },
+    "drag_coeff": 0.38,
+    "tire": {
+      "width_mm": 265,
+      "aspect_ratio_pct": 65,
+      "rim_diameter_in": 18
+    },
+    "ground_clearance_m": 0.201,
+    "weight_distribution_pct": {
+      "front": 50.8,
+      "rear": 49.2
+    },
+    "dimensions_m": {
+      "length": 5.18,
+      "width": 2.045,
+      "height": 1.882
+    },
+    "wheel_radius_m": 0.401,
+    "suspension_rest_m": 0.602
+  }
+]

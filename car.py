@@ -6,19 +6,19 @@ def collect_car_vertices(car, car_up, car_dir, dt, wheel_spin_accum):
     main_vertices = []  # Car body, tires, wind lines
     shock_vertices = []  # Shocks for thicker rendering
 
-    # Car body
-    half_length = 1.2
-    half_width = 0.8
-    half_height = 0.6
+    # Car body using dimensions from car, offset by body_offset
+    half_length = car.dimensions["length"] / 2
+    half_width = car.dimensions["width"] / 2
+    half_height = car.dimensions["height"] / 2
     corners_rel = [
-        np.array([half_width, half_height, half_length]),
-        np.array([half_width, half_height, -half_length]),
-        np.array([half_width, -half_height, half_length]),
-        np.array([half_width, -half_height, -half_length]),
-        np.array([-half_width, half_height, half_length]),
-        np.array([-half_width, half_height, -half_length]),
-        np.array([-half_width, -half_height, half_length]),
-        np.array([-half_width, -half_height, -half_length]),
+        np.array([half_width, half_height + car.body_offset, half_length]),
+        np.array([half_width, half_height + car.body_offset, -half_length]),
+        np.array([half_width, -half_height + car.body_offset, half_length]),
+        np.array([half_width, -half_height + car.body_offset, -half_length]),
+        np.array([-half_width, half_height + car.body_offset, half_length]),
+        np.array([-half_width, half_height + car.body_offset, -half_length]),
+        np.array([-half_width, -half_height + car.body_offset, half_length]),
+        np.array([-half_width, -half_height + car.body_offset, -half_length]),
     ]
     world_corners = [car.body.pos + car.body.rot.rotate(c) for c in corners_rel]
     edges = [
@@ -40,6 +40,7 @@ def collect_car_vertices(car, car_up, car_dir, dt, wheel_spin_accum):
         suspension_length = max(0.1, wheel.suspension_rest - compression)
         compression_ratio = max(0, min(1, compression / wheel.suspension_rest))
         susp_color = [1 - compression_ratio, compression_ratio, 0.0, 1.0]
+        tire_color = [wheel.slip_ratio, 0.0, 0.0, 1.0] if wheel.is_grounded else [0.5, 0.5, 0.5, 1.0]
 
         local_steer = wheel.steer_angle
         local_axle = np.array([math.cos(local_steer), 0, -math.sin(local_steer)])
@@ -60,7 +61,6 @@ def collect_car_vertices(car, car_up, car_dir, dt, wheel_spin_accum):
         spin_angle = wheel_spin_accum[idx]
         cos_spin = math.cos(spin_angle)
         sin_spin = math.sin(spin_angle)
-        tire_color = [wheel.slip_ratio, 0.0, 0.0, 1.0]
         for offset in offsets:
             offset_pos = hub_pos + axle_dir * offset
             points = []
@@ -95,8 +95,8 @@ def collect_car_vertices(car, car_up, car_dir, dt, wheel_spin_accum):
     if vel_mag > 5:
         drag_mag = car.drag_coeff * vel_mag**2
         line_length = min(drag_mag / 100, 5)
-        rear_top_left = car.body.pos + car.body.rot.rotate(np.array([half_width, half_height, -half_length]))
-        rear_top_right = car.body.pos + car.body.rot.rotate(np.array([-half_width, half_height, -half_length]))
+        rear_top_left = car.body.pos + car.body.rot.rotate(np.array([half_width, half_height + car.body_offset, -half_length]))
+        rear_top_right = car.body.pos + car.body.rot.rotate(np.array([-half_width, half_height + car.body_offset, -half_length]))
         wind_color = [200/255, 200/255, 255/255, 1.0]
         for start_pos in [rear_top_left, rear_top_right]:
             end_pos = start_pos - car_dir * line_length

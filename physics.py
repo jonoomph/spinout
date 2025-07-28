@@ -96,6 +96,7 @@ class Wheel:
         self.ang_vel = 0
         self.target_steer = 0
         self.slip_ratio = 0.0
+        self.is_grounded = True
 
 class Terrain:
     def __init__(self, size=400, res=50, height_scale=100, sigma=5):
@@ -128,27 +129,98 @@ class Terrain:
         return normal / np.linalg.norm(normal)
 
 class Car:
-    def __init__(self, terrain):
+    def __init__(self, terrain, car_data=None):
         self.terrain = terrain
-        mass = 1500
-        inertia = np.array([2000, 3000, 2500], dtype=float)
+        # Load parameters from car_data
+        mass = car_data["mass_kg"]
+        inertia = np.array(car_data["inertia_diagonal"], dtype=float)  # [Ixx, Iyy, Izz]
+        wheelbase = car_data["wheelbase_m"]
+        track = car_data["track_m"]
+        radius = car_data["wheel_radius_m"]
+        suspension_rest = car_data["suspension_rest_m"]
+        spring_k_front = car_data["spring_k_N_per_m"]["front"]
+        spring_k_rear = car_data["spring_k_N_per_m"]["rear"]
+        damper_k_front = car_data["damper_k_Ns_per_m"]["front"]
+        damper_k_rear = car_data["damper_k_Ns_per_m"]["rear"]
+        drag_coeff = car_data["drag_coeff"]
+        dimensions = car_data["dimensions_m"]
+        weight_distribution = car_data["weight_distribution_pct"]
+        ground_clearance = car_data["ground_clearance_m"]
+        drive_type = car_data["drive_type"]
+
         self.body = RigidBody(mass, inertia)
-        wheelbase = 2.5
-        track = 1.5
-        radius = 0.35
-        suspension_rest = 0.4
-        spring_k = 35000
-        damper_k = 3000
-        fl = Wheel(np.array([-track / 2, -suspension_rest, wheelbase / 2], dtype=float), radius, suspension_rest, spring_k, damper_k, True, False)
-        fr = Wheel(np.array([track / 2, -suspension_rest, wheelbase / 2], dtype=float), radius, suspension_rest, spring_k, damper_k, True, False)
-        rl = Wheel(np.array([-track / 2, -suspension_rest, -wheelbase / 2], dtype=float), radius, suspension_rest, spring_k, damper_k, False, True)
-        rr = Wheel(np.array([track / 2, -suspension_rest, -wheelbase / 2], dtype=float), radius, suspension_rest, spring_k, damper_k, False, True)
+        self.dimensions = dimensions
+        self.weight_distribution = weight_distribution
+        self.ground_clearance = ground_clearance
+        self.drag_coeff = drag_coeff
+        self.steer_limit = math.radians(30)
+        self.is_upside_down = False
+
+        # Calculate body_offset for rendering to ensure correct height after compression
+        half_length = dimensions["length"] / 2
+        half_width = dimensions["width"] / 2
+        half_height = dimensions["height"] / 2
+        g = 9.81
+        front_pct = weight_distribution["front"] / 100
+        rear_pct = weight_distribution["rear"] / 100
+        front_load_per_wheel = mass * g * front_pct / 2
+        rear_load_per_wheel = mass * g * rear_pct / 2
+        front_compression = front_load_per_wheel / spring_k_front
+        rear_compression = rear_load_per_wheel / spring_k_rear
+        sag_cog = front_compression * front_pct + rear_compression * rear_pct
+        cog_height_cal = radius + suspension_rest - sag_cog
+        self.body_offset = ground_clearance - cog_height_cal + half_height
+
+        # Define top corner collision points with offset
+        self.collision_points = [
+            np.array([half_width, half_height + self.body_offset, half_length]),
+            np.array([-half_width, half_height + self.body_offset, half_length]),
+            np.array([half_width, half_height + self.body_offset, -half_length]),
+            np.array([-half_width, half_height + self.body_offset, -half_length]),
+        ]
+
+        # Wheel positions (no body_offset in physics)
+        wheel_y = -suspension_rest
+        fl = Wheel(
+            np.array([-track / 2, wheel_y, wheelbase / 2], dtype=float),
+            radius,
+            suspension_rest,
+            spring_k_front,
+            damper_k_front,
+            True,
+            drive_type in ["FWD", "AWD"],
+        )
+        fr = Wheel(
+            np.array([track / 2, wheel_y, wheelbase / 2], dtype=float),
+            radius,
+            suspension_rest,
+            spring_k_front,
+            damper_k_front,
+            True,
+            drive_type in ["FWD", "AWD"],
+        )
+        rl = Wheel(
+            np.array([-track / 2, wheel_y, -wheelbase / 2], dtype=float),
+            radius,
+            suspension_rest,
+            spring_k_rear,
+            damper_k_rear,
+            False,
+            drive_type in ["RWD", "AWD"],
+        )
+        rr = Wheel(
+            np.array([track / 2, wheel_y, -wheelbase / 2], dtype=float),
+            radius,
+            suspension_rest,
+            spring_k_rear,
+            damper_k_rear,
+            False,
+            drive_type in ["RWD", "AWD"],
+        )
         self.wheels = [fl, fr, rl, rr]
         self.steer = 0
         self.accel = 0
         self.brake = 0
-        self.drag_coeff = 0.3
-        self.steer_limit = math.radians(30)
 
     def update(self, dt):
         gravity = np.array([0, -9.81, 0], dtype=float) * self.body.mass
@@ -159,13 +231,25 @@ class Car:
             drag_force = self.drag_coeff * vel_mag**2 * drag_dir
             self.body.apply_force(drag_force, self.body.pos)
 
-        gravity_per_wheel = np.array([0, -9.81, 0], dtype=float) * self.body.mass / len(self.wheels)
-        for wheel in self.wheels:
+        # Check car orientation and collision points
+        car_up = self.body.rot.rotate(np.array([0, 1, 0]))
+        self.is_upside_down = car_up[1] < -0.7  # Car is upside down if up vector points significantly downward
+        wheels_grounded = 0
+        gravity_front = np.array([0, -9.81, 0], dtype=float) * self.body.mass * self.weight_distribution["front"] / 100 / 2
+        gravity_rear = np.array([0, -9.81, 0], dtype=float) * self.body.mass * self.weight_distribution["rear"] / 100 / 2
+
+        # Handle wheel forces only for grounded wheels
+        for idx, wheel in enumerate(self.wheels):
             wheel_world_pos = self.body.pos + self.body.rot.rotate(wheel.rel_pos)
             if wheel_world_pos[0] < 0 or wheel_world_pos[0] > self.terrain.size or wheel_world_pos[2] < 0 or wheel_world_pos[2] > self.terrain.size:
+                wheel.is_grounded = False
                 continue
             ground_h = self.terrain.get_height(wheel_world_pos[0], wheel_world_pos[2])
             compression = ground_h + wheel.radius - wheel_world_pos[1]
+            wheel.is_grounded = compression > 0 and not self.is_upside_down
+            if not wheel.is_grounded:
+                continue
+            wheels_grounded += 1
             rel_pos = wheel_world_pos - self.body.pos
             vel_at_wheel = self.body.vel + np.cross(self.body.angvel, rel_pos)
             spring_force = wheel.spring_k * compression
@@ -204,6 +288,7 @@ class Car:
                 is_static_condition = self.brake > 0 and abs(long_vel) < 0.5 and abs(wheel.ang_vel) < 0.1
                 mu = mu_static if is_static_condition else mu_dynamic
                 max_fric = mu * load
+                gravity_per_wheel = gravity_front if wheel.is_front else gravity_rear
                 if is_static_condition:
                     projected_g = gravity_per_wheel - np.dot(gravity_per_wheel, normal) * normal
                     required_long = -np.dot(projected_g, forward_tang)
@@ -217,15 +302,39 @@ class Car:
                     long_force *= scale
                     lat_force *= scale
                 tire_force = forward_tang * long_force + right_tang * lat_force
-                self.body.apply_force(tire_force, wheel_world_pos)
-                drive_torque = self.accel * 1400 if wheel.is_driven else 0
+                if wheel.is_grounded:
+                    self.body.apply_force(tire_force, wheel_world_pos)
+                drive_torque = self.accel * 1400 if wheel.is_driven and wheel.is_grounded else 0
                 brake_sign = math.copysign(1, wheel.ang_vel) if abs(wheel.ang_vel) > 0 else 0
-                brake_torque = -self.brake * 2800 * brake_sign if self.brake > 0 else 0
+                brake_torque = -self.brake * 2800 * brake_sign if self.brake > 0 and wheel.is_grounded else 0
                 friction_torque = 0 if is_static_condition else -long_force * wheel.radius
                 wheel_inertia = 10
-                if self.brake > 0 and abs(long_vel) < 0.5:
+                if self.brake > 0 and abs(long_vel) < 0.5 and wheel.is_grounded:
                     wheel.ang_vel = 0
                 else:
                     ang_accel = (drive_torque + brake_torque + friction_torque) / wheel_inertia
                     wheel.ang_vel += ang_accel * dt
+
+        # Handle collision points for top corners when upside down
+        if self.is_upside_down or wheels_grounded < 2:
+            for point in self.collision_points:
+                point_world_pos = self.body.pos + self.body.rot.rotate(point)
+                ground_h = self.terrain.get_height(point_world_pos[0], point_world_pos[2])
+                if point_world_pos[1] <= ground_h:
+                    normal = self.terrain.get_normal(point_world_pos[0], point_world_pos[2])
+                    rel_pos = point_world_pos - self.body.pos
+                    vel_at_point = self.body.vel + np.cross(self.body.angvel, rel_pos)
+                    penetration = ground_h - point_world_pos[1]
+                    spring_force = 35000 * penetration  # Use similar spring constant as wheels
+                    damper_force = -3000 * vel_at_point[1]  # Use similar damper constant
+                    normal_force = max(0, spring_force + damper_force)
+                    if normal_force > 0:
+                        force_vec = normal * normal_force
+                        self.body.apply_force(force_vec, point_world_pos)
+                        # Apply friction
+                        contact_vel = vel_at_point - normal * np.dot(vel_at_point, normal)
+                        friction_dir = -contact_vel / (np.linalg.norm(contact_vel) + 0.01)
+                        friction_force = friction_dir * normal_force * 0.8  # Friction coefficient
+                        self.body.apply_force(friction_force, point_world_pos)
+
         self.body.update(dt)

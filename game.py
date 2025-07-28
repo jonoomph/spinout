@@ -10,6 +10,7 @@ from render import RenderContext
 from utils import compute_mvp
 from terrain import build_terrain_vertices
 from car import collect_car_vertices
+import json
 
 pygame.init()
 width, height = 1854, 1168
@@ -19,7 +20,14 @@ clock = pygame.time.Clock()
 
 render_ctx = RenderContext(width, height)
 terrain = Terrain(size=800, res=200)
-car = Car(terrain)
+
+# Load cars from JSON
+with open("cars.json", "r") as f:
+    cars_data = json.load(f)
+
+# Initialize with first car
+current_car_index = 0
+car = Car(terrain, cars_data[current_car_index])
 start_x, start_z = terrain.size / 2, terrain.size / 2
 car.body.pos = np.array([start_x, terrain.get_height(start_x, start_z) + 2, start_z])
 
@@ -42,7 +50,16 @@ while running:
             running = False
 
     keys = pygame.key.get_pressed()
-    car.steer, car.accel, car.brake = get_controls(keys)
+    steer, accel, brake, car_index = get_controls(keys)
+    if car_index is not None and car_index != current_car_index:
+        # Change car
+        current_car_index = max(0, min(len(cars_data) - 1, car_index))
+        old_pos = car.body.pos
+        car = Car(terrain, cars_data[current_car_index])
+        car.body.pos = old_pos
+        wheel_spin_accum = [0.0] * 4
+
+    car.steer, car.accel, car.brake = steer, accel, brake
 
     for _ in range(substeps):
         car.update(dt / substeps)
@@ -70,7 +87,8 @@ while running:
     steer_angle = car.wheels[0].steer_angle if car.wheels[0].is_front else 0
     hud_surf = pygame.Surface((width, height), pygame.SRCALPHA)
     hud_surf.fill((0, 0, 0, 0))
-    render_hud(hud_surf, font, speed_mph, render_fps, physics_fps, steer_angle)
+    car_info = f"Car: {cars_data[current_car_index]['make']} {cars_data[current_car_index]['model']} ({cars_data[current_car_index]['year']})"
+    render_hud(hud_surf, font, speed_mph, render_fps, physics_fps, steer_angle, car_info)
     render_ctx.render_hud(hud_surf)
 
     pygame.display.flip()
