@@ -54,3 +54,11 @@ pip install -r requirements.txt
 ```bash
 python game.py
 ```
+
+## Inspiration
+
+This project is inspired by the Comma.ai [controls challenge](https://github.com/jonoomph/controls_challenge), 
+where I submitted an award-winning entry, using a neural network trained by a simple 2D driving game. This project
+is an extension of that work, and will focus on 3D simulation of car dynamics on random terrain. The goal is to 
+provide a fast, simple, and powerful training simulator for self-driving controllers, which focuses on both lateral and 
+longitudal controls.
