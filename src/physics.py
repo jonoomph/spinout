@@ -111,6 +111,9 @@ class Wheel:
         self.target_steer = 0
         self.slip_ratio = 0.0
         self.is_grounded = True
+        # Amount of suspension compression used in physics calculations
+        # (0 = fully extended, suspension_rest = fully compressed)
+        self.compression = 0.0
 
 
 class Terrain:
@@ -285,10 +288,12 @@ class Car:
             or pos[2] > self.terrain.size
         ):
             wheel.is_grounded = False
+            wheel.compression = 0.0
             return 0
         ground_h = self.terrain.get_height(pos[0], pos[2])
         compression = ground_h + wheel.radius - pos[1]
         wheel.is_grounded = compression > 0 and not self.is_upside_down
+        wheel.compression = max(0.0, compression) if wheel.is_grounded else 0.0
         if not wheel.is_grounded:
             return 0
         rel_pos = pos - self.body.pos

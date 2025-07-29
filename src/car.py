@@ -52,16 +52,14 @@ def collect_car_vertices(car, car_up, car_dir, dt, wheel_spin_accum):
     # Wheels
     for idx, wheel in enumerate(car.wheels):
         hub_pos = car.body.pos + car.body.rot.rotate(wheel.rel_pos)
-        ground_h = car.terrain.get_height(hub_pos[0], hub_pos[2])
-        if math.isfinite(ground_h):
-            compression = ground_h + wheel.radius - hub_pos[1]
-            suspension_length = max(0.1, wheel.suspension_rest - compression)
-            compression_ratio = max(0, min(1, compression / wheel.suspension_rest))
-        else:
-            compression = 0
-            suspension_length = wheel.suspension_rest
-            compression_ratio = 0
-        susp_color = [1 - compression_ratio, compression_ratio, 0.0, 1.0]
+        # Suspension compression is computed during physics update and stored on
+        # each wheel. Use that value for consistent visualization.
+        compression = wheel.compression
+        compression_ratio = max(0.0, min(1.0, compression / wheel.suspension_rest))
+        suspension_length = max(0.05, wheel.suspension_rest - compression)
+        # Color shocks from green (fully extended) to red (fully compressed)
+        # to visualize suspension travel clearly.
+        susp_color = [compression_ratio, 1 - compression_ratio, 0.0, 1.0]
         tire_color = [wheel.slip_ratio, 0.0, 0.0, 1.0] if wheel.is_grounded else [0.5, 0.5, 0.5, 1.0]
 
         local_steer = wheel.steer_angle
