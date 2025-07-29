@@ -20,4 +20,4 @@ def compute_mvp(width, height, camera_pos, camera_right, camera_forward, camera_
     proj[2,3] = -2 * far * near / (far - near)
     proj[3,2] = -1
 
-    return proj @ view @ np.eye(4, dtype='f4')
+    return proj @ view @ np.eye(4, dtype="f4")

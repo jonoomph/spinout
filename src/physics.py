@@ -84,7 +84,7 @@ class RigidBody:
         self.torque[:] = 0
 
 class Wheel:
-    def __init__(self, rel_pos, radius, suspension_rest, spring_k, damper_k, is_front, is_driven):
+    def __init__(self, rel_pos, radius, suspension_rest, spring_k, damper_k, is_front, is_driven, width):
         self.rel_pos = rel_pos
         self.radius = radius
         self.suspension_rest = suspension_rest
@@ -92,6 +92,7 @@ class Wheel:
         self.damper_k = damper_k
         self.is_front = is_front
         self.is_driven = is_driven
+        self.width = width
         self.steer_angle = 0
         self.ang_vel = 0
         self.target_steer = 0
@@ -108,7 +109,7 @@ class Terrain:
 
     def get_height(self, x, z):
         if x < 0 or x > self.size or z < 0 or z > self.size:
-            return 0
+            return float("-inf")
         ix = min(max(int(x / self.cell_size), 0), self.res - 2)
         iz = min(max(int(z / self.cell_size), 0), self.res - 2)
         fx = (x - ix * self.cell_size) / self.cell_size
@@ -123,10 +124,20 @@ class Terrain:
 
     def get_normal(self, x, z):
         dx = 0.1
+        if (
+            x < dx
+            or x > self.size - dx
+            or z < dx
+            or z > self.size - dx
+        ):
+            return np.array([0.0, 1.0, 0.0])
         dyx = self.get_height(x + dx, z) - self.get_height(x - dx, z)
         dyz = self.get_height(x, z + dx) - self.get_height(x, z - dx)
         normal = np.array([-dyx / (2 * dx), 1, -dyz / (2 * dx)])
-        return normal / np.linalg.norm(normal)
+        norm = np.linalg.norm(normal)
+        if norm == 0 or not np.isfinite(norm):
+            return np.array([0.0, 1.0, 0.0])
+        return normal / norm
 
 class Car:
     def __init__(self, terrain, car_data=None):
@@ -138,6 +149,9 @@ class Car:
         track = car_data["track_m"]
         radius = car_data["wheel_radius_m"]
         suspension_rest = car_data["suspension_rest_m"]
+        tire_width = car_data["tire"]["width_mm"] / 1000.0
+        self.engine_torque = car_data.get("engine_torque_nm", 180)
+        self.brake_torque = 2800
         spring_k_front = car_data["spring_k_N_per_m"]["front"]
         spring_k_rear = car_data["spring_k_N_per_m"]["rear"]
         damper_k_front = car_data["damper_k_Ns_per_m"]["front"]
@@ -153,6 +167,7 @@ class Car:
         self.weight_distribution = weight_distribution
         self.ground_clearance = ground_clearance
         self.drag_coeff = drag_coeff
+        self.tire_width = tire_width
         self.steer_limit = math.radians(30)
         self.is_upside_down = False
 
@@ -168,8 +183,9 @@ class Car:
         front_compression = front_load_per_wheel / spring_k_front
         rear_compression = rear_load_per_wheel / spring_k_rear
         sag_cog = front_compression * front_pct + rear_compression * rear_pct
-        cog_height_cal = radius + suspension_rest - sag_cog
-        self.body_offset = ground_clearance - cog_height_cal + half_height
+        # Keep the bottom clearance equal to the specified ground clearance when
+        # the car is resting under its own weight.
+        self.body_offset = ground_clearance - radius - suspension_rest + sag_cog + half_height
 
         # Define top corner collision points with offset
         self.collision_points = [
@@ -189,6 +205,7 @@ class Car:
             damper_k_front,
             True,
             drive_type in ["FWD", "AWD"],
+            tire_width,
         )
         fr = Wheel(
             np.array([track / 2, wheel_y, wheelbase / 2], dtype=float),
@@ -198,6 +215,7 @@ class Car:
             damper_k_front,
             True,
             drive_type in ["FWD", "AWD"],
+            tire_width,
         )
         rl = Wheel(
             np.array([-track / 2, wheel_y, -wheelbase / 2], dtype=float),
@@ -207,6 +225,7 @@ class Car:
             damper_k_rear,
             False,
             drive_type in ["RWD", "AWD"],
+            tire_width,
         )
         rr = Wheel(
             np.array([track / 2, wheel_y, -wheelbase / 2], dtype=float),
@@ -216,6 +235,7 @@ class Car:
             damper_k_rear,
             False,
             drive_type in ["RWD", "AWD"],
+            tire_width,
         )
         self.wheels = [fl, fr, rl, rr]
         self.steer = 0
@@ -287,7 +307,8 @@ class Car:
                 mu_dynamic = 1.2
                 is_static_condition = self.brake > 0 and abs(long_vel) < 0.5 and abs(wheel.ang_vel) < 0.1
                 mu = mu_static if is_static_condition else mu_dynamic
-                max_fric = mu * load
+                width_factor = wheel.width / 0.2
+                max_fric = mu * load * width_factor
                 gravity_per_wheel = gravity_front if wheel.is_front else gravity_rear
                 if is_static_condition:
                     projected_g = gravity_per_wheel - np.dot(gravity_per_wheel, normal) * normal
@@ -304,9 +325,13 @@ class Car:
                 tire_force = forward_tang * long_force + right_tang * lat_force
                 if wheel.is_grounded:
                     self.body.apply_force(tire_force, wheel_world_pos)
-                drive_torque = self.accel * 1400 if wheel.is_driven and wheel.is_grounded else 0
+                drive_torque = (
+                    self.accel * self.engine_torque * 8
+                    if wheel.is_driven and wheel.is_grounded
+                    else 0
+                )
                 brake_sign = math.copysign(1, wheel.ang_vel) if abs(wheel.ang_vel) > 0 else 0
-                brake_torque = -self.brake * 2800 * brake_sign if self.brake > 0 and wheel.is_grounded else 0
+                brake_torque = -self.brake * self.brake_torque * brake_sign if self.brake > 0 and wheel.is_grounded else 0
                 friction_torque = 0 if is_static_condition else -long_force * wheel.radius
                 wheel_inertia = 10
                 if self.brake > 0 and abs(long_vel) < 0.5 and wheel.is_grounded:

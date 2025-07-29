@@ -22,6 +22,7 @@
       "rear": 1426
     },
     "drag_coeff": 0.29,
+    "engine_torque_nm": 205,
     "tire": {
       "width_mm": 205,
       "aspect_ratio_pct": 55,
@@ -63,6 +64,7 @@
       "rear": 1487
     },
     "drag_coeff": 0.27,
+    "engine_torque_nm": 260,
     "tire": {
       "width_mm": 235,
       "aspect_ratio_pct": 40,
@@ -104,6 +106,7 @@
       "rear": 1096
     },
     "drag_coeff": 0.29,
+    "engine_torque_nm": 362,
     "tire": {
       "width_mm": 235,
       "aspect_ratio_pct": 45,
@@ -145,6 +148,7 @@
       "rear": 1187
     },
     "drag_coeff": 0.37,
+    "engine_torque_nm": 637,
     "tire": {
       "width_mm": 265,
       "aspect_ratio_pct": 60,
@@ -186,6 +190,7 @@
       "rear": 1585
     },
     "drag_coeff": 0.42,
+    "engine_torque_nm": 570,
     "tire": {
       "width_mm": 255,
       "aspect_ratio_pct": 40,
@@ -227,6 +232,7 @@
       "rear": 1832
     },
     "drag_coeff": 0.38,
+    "engine_torque_nm": 518,
     "tire": {
       "width_mm": 265,
       "aspect_ratio_pct": 65,

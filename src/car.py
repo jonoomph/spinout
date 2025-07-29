@@ -36,9 +36,14 @@ def collect_car_vertices(car, car_up, car_dir, dt, wheel_spin_accum):
     for idx, wheel in enumerate(car.wheels):
         hub_pos = car.body.pos + car.body.rot.rotate(wheel.rel_pos)
         ground_h = car.terrain.get_height(hub_pos[0], hub_pos[2])
-        compression = ground_h + wheel.radius - hub_pos[1]
-        suspension_length = max(0.1, wheel.suspension_rest - compression)
-        compression_ratio = max(0, min(1, compression / wheel.suspension_rest))
+        if math.isfinite(ground_h):
+            compression = ground_h + wheel.radius - hub_pos[1]
+            suspension_length = max(0.1, wheel.suspension_rest - compression)
+            compression_ratio = max(0, min(1, compression / wheel.suspension_rest))
+        else:
+            compression = 0
+            suspension_length = wheel.suspension_rest
+            compression_ratio = 0
         susp_color = [1 - compression_ratio, compression_ratio, 0.0, 1.0]
         tire_color = [wheel.slip_ratio, 0.0, 0.0, 1.0] if wheel.is_grounded else [0.5, 0.5, 0.5, 1.0]
 
@@ -54,7 +59,7 @@ def collect_car_vertices(car, car_up, car_dir, dt, wheel_spin_accum):
         v2 = np.cross(axle_dir, v1)
         v2_norm = np.linalg.norm(v2)
         v2 = v2 / v2_norm if v2_norm > 0 else v2
-        tire_width = 0.2
+        tire_width = car.tire_width
         offsets = [-tire_width / 2, tire_width / 2]
         num_points = 16
         points_lists = []
