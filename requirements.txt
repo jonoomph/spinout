@@ -2,3 +2,4 @@ numpy
 noise
 scipy
 moderngl
+pygame
