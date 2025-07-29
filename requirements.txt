@@ -3,3 +3,4 @@ noise
 scipy
 moderngl
 pygame
+pytest
