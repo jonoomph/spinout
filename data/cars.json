@@ -12,7 +12,7 @@
       583.0
     ],
     "wheelbase_m": 2.7,
-    "track_m": 1.519,
+    "track_m": 1.527,
     "spring_k_N_per_m": {
       "front": 27684,
       "rear": 38100
@@ -39,7 +39,26 @@
       "height": 1.435
     },
     "wheel_radius_m": 0.316,
-    "suspension_rest_m": 0.446
+    "suspension_rest_m": 0.446,
+    "tests": {
+      "0_60_mph_accel_s": 8.0,
+      "60_0_mph_brake_s": 2.7
+    },
+    "engine": {
+      "torque_curve": {
+        "1000": 100,
+        "3000": 180,
+        "4300": 205,
+        "6000": 180,
+        "6600": 160
+      },
+      "gear_ratios": [
+        3.378,
+        0.447
+      ],
+      "final_drive": 4.262
+    },
+    "rolling_resistance": 0.013
   },
   {
     "category": "mid_size_sedan",
@@ -70,7 +89,7 @@
       "aspect_ratio_pct": 40,
       "rim_diameter_in": 19
     },
-    "ground_clearance_m": 0.127,
+    "ground_clearance_m": 0.149,
     "weight_distribution_pct": {
       "front": 60.1,
       "rear": 39.9
@@ -81,7 +100,34 @@
       "height": 1.45
     },
     "wheel_radius_m": 0.335,
-    "suspension_rest_m": 0.462
+    "suspension_rest_m": 0.462,
+    "tests": {
+      "0_60_mph_accel_s": 7.3,
+      "60_0_mph_brake_s": 2.8
+    },
+    "engine": {
+      "torque_curve": {
+        "1000": 120,
+        "1500": 220,
+        "1600": 260,
+        "5500": 250,
+        "6000": 220
+      },
+      "gear_ratios": [
+        5.246,
+        3.271,
+        2.185,
+        1.597,
+        1.304,
+        1.000,
+        0.782,
+        0.653,
+        0.581,
+        0.517
+      ],
+      "final_drive": 3.55
+    },
+    "rolling_resistance": 0.014
   },
   {
     "category": "full_size_sedan",
@@ -96,7 +142,7 @@
       830.0
     ],
     "wheelbase_m": 2.87,
-    "track_m": 1.585,
+    "track_m": 1.600,
     "spring_k_N_per_m": {
       "front": 30000,
       "rear": 35000
@@ -105,7 +151,7 @@
       "front": 1096,
       "rear": 1096
     },
-    "drag_coeff": 0.29,
+    "drag_coeff": 0.27,
     "engine_torque_nm": 362,
     "tire": {
       "width_mm": 235,
@@ -123,7 +169,32 @@
       "height": 1.435
     },
     "wheel_radius_m": 0.334,
-    "suspension_rest_m": 0.469
+    "suspension_rest_m": 0.469,
+    "tests": {
+      "0_60_mph_accel_s": 6.0,
+      "60_0_mph_brake_s": 2.6
+    },
+    "engine": {
+      "torque_curve": {
+        "1000": 200,
+        "3000": 320,
+        "4700": 362,
+        "6000": 340,
+        "6600": 325
+      },
+      "gear_ratios": [
+        5.520,
+        3.180,
+        2.050,
+        1.490,
+        1.230,
+        1.000,
+        0.800,
+        0.670
+      ],
+      "final_drive": 2.56
+    },
+    "rolling_resistance": 0.015
   },
   {
     "category": "truck",
@@ -156,8 +227,8 @@
     },
     "ground_clearance_m": 0.218,
     "weight_distribution_pct": {
-      "front": 50,
-      "rear": 50
+      "front": 56,
+      "rear": 44
     },
     "dimensions_m": {
       "length": 5.89,
@@ -165,7 +236,34 @@
       "height": 1.924
     },
     "wheel_radius_m": 0.388,
-    "suspension_rest_m": 0.606
+    "suspension_rest_m": 0.606,
+    "tests": {
+      "0_60_mph_accel_s": 6.0,
+      "60_0_mph_brake_s": 3.0
+    },
+    "engine": {
+      "torque_curve": {
+        "1000": 300,
+        "2500": 637,
+        "3500": 610,
+        "5000": 540,
+        "6000": 450
+      },
+      "gear_ratios": [
+        4.696,
+        2.985,
+        2.146,
+        1.769,
+        1.520,
+        1.275,
+        1.000,
+        0.854,
+        0.689,
+        0.636
+      ],
+      "final_drive": 3.31
+    },
+    "rolling_resistance": 0.020
   },
   {
     "category": "sports_car",
@@ -189,7 +287,7 @@
       "front": 1585,
       "rear": 1585
     },
-    "drag_coeff": 0.42,
+    "drag_coeff": 0.33,
     "engine_torque_nm": 570,
     "tire": {
       "width_mm": 255,
@@ -207,7 +305,34 @@
       "height": 1.378
     },
     "wheel_radius_m": 0.343,
-    "suspension_rest_m": 0.487
+    "suspension_rest_m": 0.487,
+    "tests": {
+      "0_60_mph_accel_s": 4.3,
+      "60_0_mph_brake_s": 2.4
+    },
+    "engine": {
+      "torque_curve": {
+        "1500": 250,
+        "3000": 450,
+        "4600": 570,
+        "6000": 520,
+        "7000": 470
+      },
+      "gear_ratios": [
+        4.700,
+        2.990,
+        2.150,
+        1.770,
+        1.520,
+        1.280,
+        1.000,
+        0.850,
+        0.690,
+        0.640
+      ],
+      "final_drive": 3.55
+    },
+    "rolling_resistance": 0.015
   },
   {
     "category": "full_size_SUV",
@@ -249,6 +374,29 @@
       "height": 1.882
     },
     "wheel_radius_m": 0.401,
-    "suspension_rest_m": 0.602
+    "suspension_rest_m": 0.602,
+    "tests": {
+      "0_60_mph_accel_s": 7.5,
+      "60_0_mph_brake_s": 2.9
+    },
+    "engine": {
+      "torque_curve": {
+        "1000": 250,
+        "2000": 450,
+        "4100": 519,
+        "5000": 470,
+        "5600": 450
+      },
+      "gear_ratios": [
+        4.030,
+        2.360,
+        1.530,
+        1.150,
+        0.850,
+        0.670
+      ],
+      "final_drive": 3.08
+    },
+    "rolling_resistance": 0.018
   }
 ]
