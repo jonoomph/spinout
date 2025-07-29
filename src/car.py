@@ -2,6 +2,23 @@
 import math
 import numpy as np
 
+
+def _wheel_points(offset_pos, axle_dir, v1, v2, angle, radius, num):
+    cos_a = math.cos(angle)
+    sin_a = math.sin(angle)
+    pts = []
+    for i in range(num):
+        t = 2 * math.pi * i / num
+        local = v1 * math.cos(t) + v2 * math.sin(t)
+        rot = (
+            local * cos_a
+            - np.cross(axle_dir, local) * sin_a
+            + axle_dir * np.dot(axle_dir, local) * (1 - cos_a)
+        )
+        pts.append(offset_pos + rot * radius)
+    return pts
+
+
 def collect_car_vertices(car, car_up, car_dir, dt, wheel_spin_accum):
     main_vertices = []  # Car body, tires, wind lines
     shock_vertices = []  # Shocks for thicker rendering
@@ -62,20 +79,19 @@ def collect_car_vertices(car, car_up, car_dir, dt, wheel_spin_accum):
         tire_width = car.tire_width
         offsets = [-tire_width / 2, tire_width / 2]
         num_points = 16
-        points_lists = []
         spin_angle = wheel_spin_accum[idx]
-        cos_spin = math.cos(spin_angle)
-        sin_spin = math.sin(spin_angle)
-        for offset in offsets:
-            offset_pos = hub_pos + axle_dir * offset
-            points = []
-            for i in range(num_points):
-                theta = 2 * math.pi * i / num_points
-                local_point = v1 * math.cos(theta) + v2 * math.sin(theta)
-                rotated_point = local_point * cos_spin - np.cross(axle_dir, local_point) * sin_spin + axle_dir * np.dot(axle_dir, local_point) * (1 - cos_spin)
-                point = offset_pos + rotated_point * wheel.radius
-                points.append(point)
-            points_lists.append(points)
+        points_lists = [
+            _wheel_points(
+                hub_pos + axle_dir * off,
+                axle_dir,
+                v1,
+                v2,
+                spin_angle,
+                wheel.radius,
+                num_points,
+            )
+            for off in offsets
+        ]
         for points in points_lists:
             for i in range(num_points):
                 p1 = points[i]
