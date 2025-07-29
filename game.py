@@ -88,7 +88,17 @@ while running:
     hud_surf = pygame.Surface((width, height), pygame.SRCALPHA)
     hud_surf.fill((0, 0, 0, 0))
     car_info = f"Car: {cars_data[current_car_index]['make']} {cars_data[current_car_index]['model']} ({cars_data[current_car_index]['year']})"
-    render_hud(hud_surf, font, speed_mph, render_fps, physics_fps, steer_angle, car_info)
+    render_hud(
+        hud_surf,
+        font,
+        speed_mph,
+        render_fps,
+        physics_fps,
+        steer_angle,
+        car_info,
+        rpm=car.engine_rpm,
+        gear=car.current_gear,
+    )
     render_ctx.render_hud(hud_surf)
 
     pygame.display.flip()

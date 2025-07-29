@@ -116,6 +116,69 @@ class Wheel:
         self.compression = 0.0
 
 
+class PowerTrain:
+    def __init__(self, torque_curve, gear_ratios, final_drive):
+        """Simple powertrain using engine torque curves and gearing."""
+        # torque_curve keys come in as strings from JSON, convert and sort
+        self.curve = sorted((float(rpm), torque) for rpm, torque in torque_curve.items())
+        self.gear_ratios = gear_ratios
+        self.final_drive = final_drive
+        self.is_cvt = len(gear_ratios) == 2
+        self.current_gear = 1
+        self.rpm = 0.0
+        # store rpm for peak torque for CVT target
+        self.peak_rpm = max(self.curve, key=lambda x: x[1])[0]
+        self.idle_rpm = self.curve[0][0]
+        self.max_rpm = self.curve[-1][0]
+
+    def _torque_at_rpm(self, rpm):
+        if rpm <= self.curve[0][0]:
+            return self.curve[0][1]
+        if rpm >= self.curve[-1][0]:
+            return self.curve[-1][1]
+        for (r0, t0), (r1, t1) in zip(self.curve[:-1], self.curve[1:]):
+            if r0 <= rpm <= r1:
+                ratio = (rpm - r0) / (r1 - r0)
+                return t0 + ratio * (t1 - t0)
+        return self.curve[-1][1]
+
+    def compute_wheel_torque(self, wheel_speed):
+        """Return wheel torque and update current gear and rpm."""
+        # wheel_speed is rad/s of the wheels (estimated from vehicle speed)
+        if self.is_cvt:
+            max_ratio = max(self.gear_ratios)
+            min_ratio = min(self.gear_ratios)
+            if wheel_speed > 0:
+                desired = (self.peak_rpm * 2 * math.pi / 60) / (wheel_speed * self.final_drive)
+            else:
+                desired = max_ratio
+            ratio = max(min(desired, max_ratio), min_ratio)
+            mid = (max_ratio + min_ratio) / 2
+            self.current_gear = 1 if ratio >= mid else 2
+        else:
+            best_power = -1
+            best_ratio = self.gear_ratios[-1]
+            best_gear = len(self.gear_ratios)
+            for i, gr in enumerate(self.gear_ratios):
+                rpm = wheel_speed * gr * self.final_drive * 60 / (2 * math.pi)
+                if rpm > self.max_rpm:
+                    continue
+                torque = self._torque_at_rpm(rpm)
+                power = torque * rpm
+                if power > best_power:
+                    best_power = power
+                    best_ratio = gr
+                    best_gear = i + 1
+            ratio = best_ratio
+            self.current_gear = best_gear
+
+        rpm_est = wheel_speed * ratio * self.final_drive * 60 / (2 * math.pi)
+        rpm_est = max(self.idle_rpm, min(rpm_est, self.max_rpm))
+        self.rpm = rpm_est
+        engine_torque = self._torque_at_rpm(self.rpm)
+        return engine_torque * ratio * self.final_drive
+
+
 class Terrain:
     def __init__(self, size=400, res=50, height_scale=100, sigma=5):
         self.size = size
@@ -163,13 +226,20 @@ class Car:
         radius = car_data["wheel_radius_m"]
         suspension_rest = car_data["suspension_rest_m"]
         tire_width = car_data["tire"]["width_mm"] / 1000.0
-        self.engine_torque = car_data.get("engine_torque_nm", 180)
         self.brake_torque = 2800
+        engine_data = car_data.get("engine", {})
+        torque_curve = engine_data.get("torque_curve", {})
+        gear_ratios = engine_data.get("gear_ratios", [1.0])
+        final_drive = engine_data.get("final_drive", 1.0)
+        self.powertrain = PowerTrain(torque_curve, gear_ratios, final_drive)
+        self.engine_rpm = 0.0
+        self.current_gear = 1
         spring_k_front = car_data["spring_k_N_per_m"]["front"]
         spring_k_rear = car_data["spring_k_N_per_m"]["rear"]
         damper_k_front = car_data["damper_k_Ns_per_m"]["front"]
         damper_k_rear = car_data["damper_k_Ns_per_m"]["rear"]
         drag_coeff = car_data["drag_coeff"]
+        self.rolling_resistance = car_data.get("rolling_resistance", 0.015)
         dimensions = car_data["dimensions_m"]
         weight_distribution = car_data["weight_distribution_pct"]
         ground_clearance = car_data["ground_clearance_m"]
@@ -227,6 +297,28 @@ class Car:
         self.steer = 0
         self.accel = 0
         self.brake = 0
+        self.drive_torque_per_wheel = 0.0
+
+    def _update_powertrain(self):
+        driven = [w for w in self.wheels if w.is_driven]
+        if not driven:
+            self.drive_torque_per_wheel = 0.0
+            self.engine_rpm = self.powertrain.idle_rpm
+            self.current_gear = 0
+            return
+
+        # estimate wheel speed from vehicle linear speed for more stable shifting
+        speed = np.linalg.norm(self.body.vel)
+        wheel_speed = speed / driven[0].radius
+
+        base_torque = self.powertrain.compute_wheel_torque(wheel_speed)
+        self.engine_rpm = self.powertrain.rpm
+        self.current_gear = self.powertrain.current_gear
+        if self.accel <= 0:
+            self.drive_torque_per_wheel = 0.0
+            return
+        total_torque = base_torque * self.accel
+        self.drive_torque_per_wheel = total_torque / len(driven)
 
     def _build_wheels(
         self,
@@ -278,6 +370,10 @@ class Car:
         if speed:
             drag = -self.drag_coeff * speed * self.body.vel
             self.body.apply_force(drag, self.body.pos)
+            rr = -self.rolling_resistance * self.body.mass * 9.81 * (
+                self.body.vel / speed
+            )
+            self.body.apply_force(rr, self.body.pos)
 
     def _update_wheel(self, wheel, dt, g_front, g_rear):
         pos = self.body.pos + self.body.rot.rotate(wheel.rel_pos)
@@ -351,7 +447,7 @@ class Car:
         tire_f = forward * long_f + right * lat_f
         self.body.apply_force(tire_f, pos)
         drive_t = (
-            self.accel * self.engine_torque * 8
+            self.drive_torque_per_wheel
             if wheel.is_driven and wheel.is_grounded
             else 0
         )
@@ -392,6 +488,7 @@ class Car:
 
     def update(self, dt):
         self._apply_gravity_drag()
+        self._update_powertrain()
         car_up = self.body.rot.rotate(np.array([0, 1, 0]))
         self.is_upside_down = car_up[1] < -0.7
         g_front = (

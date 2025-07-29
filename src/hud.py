@@ -2,9 +2,30 @@
 import pygame
 import math
 
-def render_hud(hud_surf, font, speed_mph, render_fps, physics_fps, steer_angle, car_info=""):
+def render_hud(
+    hud_surf,
+    font,
+    speed_mph,
+    render_fps,
+    physics_fps,
+    steer_angle,
+    car_info="",
+    rpm=None,
+    gear=None,
+):
     hud_surf.fill((0, 0, 0, 0))
-    text_speed = font.render(f"Speed: {speed_mph:.1f} mph", True, (255, 255, 255, 255))
+    if rpm is not None and gear is not None:
+        text_speed = font.render(
+            f"Speed: {speed_mph:.1f} mph [gear {gear} @ {int(rpm)} RPM]",
+            True,
+            (255, 255, 255, 255),
+        )
+    else:
+        text_speed = font.render(
+            f"Speed: {speed_mph:.1f} mph",
+            True,
+            (255, 255, 255, 255),
+        )
     text_render_fps = font.render(f"Render FPS: {render_fps:.1f}", True, (255, 255, 255, 255))
     text_physics_fps = font.render(f"Physics FPS: {physics_fps:.1f}", True, (255, 255, 255, 255))
     text_steer = font.render(f"Steer Angle: {math.degrees(steer_angle):.1f}°", True, (255, 255, 255, 255))
