@@ -62,3 +62,8 @@ where I submitted an award-winning entry, using a neural network trained by a si
 is an extension of that work, and will focus on 3D simulation of car dynamics on random terrain. The goal is to 
 provide a fast, simple, and powerful training simulator for self-driving controllers, which focuses on both lateral and 
 longitudal controls.
+
+## About Me
+I love working on AI, simulators, games, self-driving, and related tech, and I’m always interested in great conversations 
+around these topics. If this project sparks ideas, or you’d like to discuss related work, feel free to reach 
+out at jonathan@openshot.org.
