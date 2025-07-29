@@ -11,7 +11,7 @@ class RenderContext:
         self.ctx.blend_equation = moderngl.FUNC_ADD
         self.width = width
         self.height = height
-        from shaders import create_shaders
+        from src.shaders import create_shaders
         self.prog, self.prog2d = create_shaders(self.ctx)
         self.ortho = np.eye(4, dtype='f4')  # Identity for NDC
         hud_quad_data = np.array([

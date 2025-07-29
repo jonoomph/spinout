@@ -3,13 +3,13 @@ import pygame
 from pygame.locals import *
 import time
 import numpy as np
-from physics import Terrain, Car
-from controls import get_controls
-from hud import render_hud
-from render import RenderContext
-from utils import compute_mvp
-from terrain import build_terrain_vertices
-from car import collect_car_vertices
+from src.physics import Terrain, Car
+from src.controls import get_controls
+from src.hud import render_hud
+from src.render import RenderContext
+from src.utils import compute_mvp
+from src.terrain import build_terrain_vertices
+from src.car import collect_car_vertices
 import json
 
 pygame.init()
@@ -22,7 +22,7 @@ render_ctx = RenderContext(width, height)
 terrain = Terrain(size=800, res=200)
 
 # Load cars from JSON
-with open("cars.json", "r") as f:
+with open("data/cars.json", "r") as f:
     cars_data = json.load(f)
 
 # Initialize with first car
