@@ -156,21 +156,28 @@ class PowerTrain:
             mid = (max_ratio + min_ratio) / 2
             self.current_gear = 1 if ratio >= mid else 2
         else:
-            best_power = -1
-            best_ratio = self.gear_ratios[-1]
-            best_gear = len(self.gear_ratios)
-            for i, gr in enumerate(self.gear_ratios):
-                rpm = wheel_speed * gr * self.final_drive * 60 / (2 * math.pi)
-                if rpm > self.max_rpm:
-                    continue
-                torque = self._torque_at_rpm(rpm)
-                power = torque * rpm
-                if power > best_power:
-                    best_power = power
-                    best_ratio = gr
-                    best_gear = i + 1
-            ratio = best_ratio
-            self.current_gear = best_gear
+            current_ratio = self.gear_ratios[self.current_gear - 1]
+            wheel_rpm = wheel_speed * 60 / (2 * math.pi)
+            rpm_est = wheel_rpm * current_ratio * self.final_drive
+
+            shift_up = self.max_rpm * 0.9
+            shift_down = self.max_rpm * 0.4
+
+            if rpm_est > shift_up and self.current_gear < len(self.gear_ratios):
+                self.current_gear += 1
+                current_ratio = self.gear_ratios[self.current_gear - 1]
+                rpm_est = wheel_rpm * current_ratio * self.final_drive
+            elif rpm_est < shift_down and self.current_gear > 1:
+                self.current_gear -= 1
+                current_ratio = self.gear_ratios[self.current_gear - 1]
+                rpm_est = wheel_rpm * current_ratio * self.final_drive
+
+            ratio = current_ratio
+            rpm_est = max(self.idle_rpm, min(rpm_est, self.max_rpm))
+            self.rpm = rpm_est
+            engine_torque = self._torque_at_rpm(self.rpm)
+            return engine_torque * ratio * self.final_drive
+
 
         rpm_est = wheel_speed * ratio * self.final_drive * 60 / (2 * math.pi)
         rpm_est = max(self.idle_rpm, min(rpm_est, self.max_rpm))
@@ -423,7 +430,7 @@ class Car:
         slip = (wheel.ang_vel * wheel.radius - long_v) / (abs(long_v) + 0.1)
         long_f = 80000 * slip
         lat_f = -80000 * alpha
-        is_static = self.brake > 0 and abs(long_v) < 0.5 and abs(wheel.ang_vel) < 0.1
+        is_static = self.brake > 0 and abs(long_v) < 0.3 and abs(wheel.ang_vel) < 0.1
         mu = 1.4 if is_static else 1.2
         width_factor = wheel.width / 0.2
         max_fric = mu * load * width_factor
@@ -431,7 +438,7 @@ class Car:
         if is_static:
             proj_g = gravity_pw - np.dot(gravity_pw, normal) * normal
             required_long = -np.dot(proj_g, forward)
-            long_f = np.clip(required_long, -max_fric, max_fric)
+            long_f += required_long
         total_f = math.hypot(long_f, lat_f)
         if total_f > max_fric > 0:
             scale = max_fric / total_f
@@ -441,7 +448,7 @@ class Car:
         lat_ratio = abs(alpha) / 0.15
         wheel.slip_ratio = (
             0.0
-            if abs(long_v) < 0.05 or (self.brake > 0 and abs(long_v) < 0.5)
+            if abs(long_v) < 0.05 or (self.brake > 0 and abs(long_v) < 0.3)
             else min(max(long_ratio, lat_ratio), 1.0)
         )
         tire_f = forward * long_f + right * lat_f
@@ -451,14 +458,15 @@ class Car:
             if wheel.is_driven and wheel.is_grounded
             else 0
         )
-        brake_sign = math.copysign(1, wheel.ang_vel) if abs(wheel.ang_vel) > 0 else 0
-        brake_t = (
-            -self.brake * self.brake_torque * brake_sign
-            if self.brake > 0 and wheel.is_grounded
-            else 0
-        )
+        brake_sign = 0
+        if self.brake > 0 and wheel.is_grounded:
+            if abs(wheel.ang_vel) > 0.1:
+                brake_sign = math.copysign(1, wheel.ang_vel)
+            elif abs(long_v) > 0.01:
+                brake_sign = math.copysign(1, long_v)
+        brake_t = -self.brake * self.brake_torque * brake_sign if brake_sign else 0
         friction_t = 0 if is_static else -long_f * wheel.radius
-        if self.brake > 0 and abs(long_v) < 0.5 and wheel.is_grounded:
+        if self.brake > 0 and abs(long_v) < 0.3 and wheel.is_grounded:
             wheel.ang_vel = 0
         else:
             ang_acc = (drive_t + brake_t + friction_t) / 10

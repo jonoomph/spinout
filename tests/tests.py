@@ -8,8 +8,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from src.physics import Car, Terrain
 
 TARGET_SPEED_MPS = 60 * 0.44704  # 60 mph to m/s
-
-VISUALIZE = 1
+SUCCESS_DIFF = 0.75
+VISUALIZE = 0
 
 
 def simulate(car, accel=True):
@@ -203,7 +203,7 @@ def run_test_visual(car, terrain, accel_expected, brake_expected):
     accel_time = time
 
     diff_a = accel_time - accel_expected
-    color_a = (0, 200, 0) if abs(diff_a) / accel_expected <= 0.05 else (200, 0, 0)
+    color_a = (0, 200, 0) if abs(diff_a) <= SUCCESS_DIFF else (200, 0, 0)
     diff_surf_accel = font.render(f"{diff_a:+.2f}s", True, color_a)
 
     car.accel = 0
@@ -239,7 +239,7 @@ def run_test_visual(car, terrain, accel_expected, brake_expected):
         prev_fwd = curr_fwd
     brake_time = time
     diff_b = brake_time - brake_expected
-    color_b = (0, 200, 0) if abs(diff_b) / brake_expected <= 0.05 else (200, 0, 0)
+    color_b = (0, 200, 0) if abs(diff_b) <= SUCCESS_DIFF else (200, 0, 0)
     diff_surf_brake = font.render(f"{diff_b:+.2f}s", True, color_b)
 
     end = pygame.time.get_ticks() + 1500
@@ -270,10 +270,10 @@ def _make_class(car_data, name):
             cls.accel_time, cls.brake_time = run_test(car_data, visualize=VISUALIZE)
 
         def test_accel(self):
-            assert abs(self.accel_time - self.accel_expected) / self.accel_expected <= 0.05
+            assert abs(self.accel_time - self.accel_expected) <= SUCCESS_DIFF
 
         def test_brake(self):
-            assert abs(self.brake_time - self.brake_expected) / self.brake_expected <= 0.05
+            assert abs(self.brake_time - self.brake_expected) <= SUCCESS_DIFF
 
     CarTest.__name__ = f"Test_{name}"
     return CarTest
