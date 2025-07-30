@@ -56,7 +56,7 @@
         3.378,
         0.447
       ],
-      "final_drive": 4.262
+      "final_drive": 4.83
     },
     "rolling_resistance": 0.013
   },
@@ -125,9 +125,10 @@
         0.581,
         0.517
       ],
-      "final_drive": 2.4
+      "final_drive": 2.6
     },
-    "rolling_resistance": 0.014
+    "rolling_resistance": 0.014,
+    "brake_torque_nm": 2000
   },
   {
     "category": "full_size_sedan",
@@ -192,7 +193,7 @@
         0.800,
         0.670
       ],
-      "final_drive": 2.56
+      "final_drive": 2.35
     },
     "rolling_resistance": 0.015
   },
@@ -261,7 +262,7 @@
         0.689,
         0.636
       ],
-      "final_drive": 3.31
+      "final_drive": 2.38
     },
     "rolling_resistance": 0.020
   },
@@ -330,7 +331,7 @@
         0.690,
         0.640
       ],
-      "final_drive": 3.55
+      "final_drive": 2.7
     },
     "rolling_resistance": 0.015
   },
@@ -395,7 +396,7 @@
         0.850,
         0.670
       ],
-      "final_drive": 3.08
+      "final_drive": 2.93
     },
     "rolling_resistance": 0.018
   }

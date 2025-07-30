@@ -233,7 +233,8 @@ class Car:
         radius = car_data["wheel_radius_m"]
         suspension_rest = car_data["suspension_rest_m"]
         tire_width = car_data["tire"]["width_mm"] / 1000.0
-        self.brake_torque = 2800
+        # Allow per-car brake torque tuning; default to original value
+        self.brake_torque = car_data.get("brake_torque_nm", 2800)
         engine_data = car_data.get("engine", {})
         torque_curve = engine_data.get("torque_curve", {})
         gear_ratios = engine_data.get("gear_ratios", [1.0])
