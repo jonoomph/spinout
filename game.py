@@ -2,7 +2,6 @@
 import pygame
 from pygame.locals import *
 import time
-import math
 import numpy as np
 from src.physics import Terrain, Car, Quaternion
 from src.roads import add_random_road, build_road_vertices, get_safe_start_position_and_rot
