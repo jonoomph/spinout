@@ -2,8 +2,10 @@
 import pygame
 from pygame.locals import *
 import time
+import math
 import numpy as np
-from src.physics import Terrain, Car
+from src.physics import Terrain, Car, Quaternion
+from src.roads import add_random_road, build_road_vertices, get_safe_start_position_and_rot
 from src.controls import get_controls
 from src.hud import render_hud
 from src.render import RenderContext
@@ -20,6 +22,11 @@ clock = pygame.time.Clock()
 
 render_ctx = RenderContext(width, height)
 terrain = Terrain(size=800, res=200)
+road_points, road_params = add_random_road(terrain)
+road_vbo = render_ctx.ctx.buffer(
+    build_road_vertices(terrain, road_points, **road_params).tobytes()
+)
+road_vao = render_ctx.ctx.vertex_array(render_ctx.prog, road_vbo, 'in_vert', 'in_color')
 
 # Load cars from JSON
 with open("data/cars.json", "r") as f:
@@ -28,8 +35,11 @@ with open("data/cars.json", "r") as f:
 # Initialize with first car
 current_car_index = 0
 car = Car(terrain, cars_data[current_car_index])
-start_x, start_z = terrain.size / 2, terrain.size / 2
-car.body.pos = np.array([start_x, terrain.get_height(start_x, start_z) + 2, start_z])
+
+# Place car on road, rotate in correct direction
+car_pos, car_rot = get_safe_start_position_and_rot(terrain, road_points, 5.0)
+car.body.pos = car_pos
+car.body.rot = car_rot
 
 terrain_vbo = render_ctx.ctx.buffer(build_terrain_vertices(terrain).tobytes())
 terrain_vao = render_ctx.ctx.vertex_array(render_ctx.prog, terrain_vbo, 'in_vert', 'in_color')
@@ -79,6 +89,7 @@ while running:
     mvp = compute_mvp(width, height, camera_pos, camera_right, camera_forward, camera_up)
     render_ctx.clear()
     render_ctx.render_terrain(terrain_vao, mvp)
+    render_ctx.render_terrain(road_vao, mvp)
     render_ctx.render_car(collect_car_vertices(car, car_up, car_dir, dt, wheel_spin_accum), mvp)
 
     speed_mph = np.linalg.norm(car.body.vel) * 2.23694
