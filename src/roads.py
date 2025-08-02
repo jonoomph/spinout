@@ -1,4 +1,3 @@
-# roads.py
 """Generate realistic road geometry over a heightmap terrain.
 
 Key additions in this revision
@@ -18,6 +17,13 @@ The rest of the module still:
 - emits a dense gray deck plus multiple green skirt rings that blend back to
   terrain, and
 - keeps all tunables at the top.
+
+Improvements in this version:
+- Increased deviation scales and allowed more backtracking for snakier paths on narrower roads.
+- Made road height lane-dependent: higher for more lanes to keep edges above terrain.
+- Reduced resampling step for fewer dense points while maintaining smoothness.
+- Added sinuosity and terrain height range to the road plan printout.
+- Fixed mini-map downsampling and added pure NumPy implementation.
 """
 
 from __future__ import annotations
@@ -51,33 +57,36 @@ DITCH_WIDTH_MAX = 4.0
 DITCH_DEPTH_MIN = 0.25  # m (extra cut below original terrain)
 DITCH_DEPTH_MAX = 1.25
 
-# Road crown above terrain (prevents z-fighting)
-ROAD_HEIGHT_MIN = 0.6  # m
-ROAD_HEIGHT_MAX = 1.8
+# Road crown above terrain (prevents z-fighting), lane-dependent
+ROAD_HEIGHT_MIN_BY_LANES = {1: 0.5, 2: 0.8, 3: 1.2, 4: 1.6, 5: 2.0, 6: 2.5}  # m min
+ROAD_HEIGHT_MAX_BY_LANES = {1: 1.5, 2: 2.0, 3: 2.5, 4: 3.0, 5: 3.5, 6: 4.0}  # m max
 
 # Centerline generation (bottom → top bias)
-CTRL_SEG_LEN = 40.0          # meters (coarse move when laying pieces)
-RESAMPLE_STEP = 1.0          # dense resampling step for stamping
-MAX_CTRL_POINTS = 15         # max number of control points (fewer for more lanes)
-MIN_CTRL_POINTS = 5
-CTRL_DEVIATION_SCALE = 0.15   # deviation factor, smaller for more lanes
+RESAMPLE_STEP = 5.0          # dense resampling step for stamping (increased for fewer points)
+MAX_CTRL_POINTS = 25         # max number of control points (fewer for more lanes)
+MIN_CTRL_POINTS = 4
+CTRL_DEVIATION_SCALE_X = 0.5 # deviation factor for x, smaller for more lanes
+CTRL_DEVIATION_SCALE_Z = 0.3 # deviation factor for z, smaller for more lanes
 SELF_HIT_MARGIN_FACTOR = 1.5 # margin as factor of full road width
 BOTTOM_MARGIN = 0.0         # start z at bottom
 SIDE_MARGIN = 0.10           # keep x inside 10% margins
 TOP_EXIT_MARGIN = 0.0       # stop once z > 95% of map size
-GEN_MAX_TRIES = 20           # max tries to generate non-overlapping path
+GEN_MAX_TRIES = 50           # max tries to generate non-overlapping path
+MAX_CTRL_FACTOR = 3          # max control points = target * factor
+BACKTRACK_FACTOR = 0.3       # max backtrack as fraction of z_advance
 
 # Curvature is lane-width aware. Use min radius per lane count.
 # (crude but effective for shaping)
 MIN_RADIUS_BY_LANES = {  # meters
-    1: 18.0,
-    2: 35.0,
-    3: 65.0,
-    4: 110.0,
-    5: 160.0,
-    6: 220.0,
+    1: 15.0,
+    2: 25.0,
+    3: 45.0,
+    4: 80.0,
+    5: 120.0,
+    6: 160.0,
 }
 MIN_RADIUS_SCALE_WITH_LANEWIDTH = 3.2  # scale vs 3.2 m nominal lane
+MIN_DEV_SCALE = 0.05  # minimum deviation scale for large roads
 
 # Sampling density around the road for stamping & rendering
 ALONG_STEP_FACTOR = 0.1   # step = cell_size * factor (>= 0.35 m)
@@ -90,19 +99,31 @@ NOISE_FREQ_MAX = 0.03
 BUMP_MAX = 0.05  # m
 HOLE_MAX = 0.05  # m depth (negative)
 
-# Spline smoothing for resampling
-PATH_SMOOTH_SIGMA_MIN = 5.0
-PATH_SMOOTH_SIGMA_MAX = 20.0  # higher for more lanes (in sparse points units, will scale)
+# Spline smoothing for resampling (in dense points units)
+PATH_SMOOTH_SIGMA_MIN = 1.0
+PATH_SMOOTH_SIGMA_MAX = 20.0  # higher for more lanes
 
 # Longitudinal smoothing for road base height
-LONG_SMOOTH_SIGMA_MIN = 30.0
-LONG_SMOOTH_SIGMA_MAX = 150.0  # higher for smoother longitudinal (in dense points units)
+LONG_SMOOTH_SIGMA_MIN = 100.0
+LONG_SMOOTH_SIGMA_MAX = 300.0  # higher for smoother longitudinal (in dense points units)
 
 # Heightmap upsampling for higher resolution near roads
 UPSAMPLE_FACTOR = 4  # Increase resolution by this factor for better detail
 
 # Car placement
 CAR_HEIGHT_ABOVE_ROAD = 1.2  # meters
+
+# Lane markings
+LINE_WIDTH = 0.15  # m
+DASH_LENGTH = 3.0  # m
+GAP_LENGTH = 9.0   # m
+ROAD_EPS = 0.01    # small offset to prevent z-fighting and ensure mesh above terrain
+
+# Colors
+ROAD_COL = [0.55, 0.55, 0.55, 1.0]
+SKIRT_COL = [34 / 255, 139 / 255, 34 / 255, 1.0]
+YELLOW_COL = [1.0, 1.0, 0.0, 1.0]
+WHITE_COL = [1.0, 1.0, 1.0, 1.0]
 
 # ---------------------------------------------------------------------------
 # Utilities
@@ -145,7 +166,7 @@ def _estimate_min_radius(path: List[_vec2], min_rad_required: float) -> bool:
 def _generate_bottom_to_top(terrain, rng: np.random.Generator, lanes: int, lane_width: float, shoulder: float) -> List[_vec2]:
     size = terrain.size
     x = rng.uniform(SIDE_MARGIN * size, (1.0 - SIDE_MARGIN) * size)
-    z = 0.0
+    ctrl_points = [np.array([x, 0.0])]
 
     # Lane-aware parameters
     min_rad = MIN_RADIUS_BY_LANES.get(lanes, 65.0)
@@ -156,47 +177,64 @@ def _generate_bottom_to_top(terrain, rng: np.random.Generator, lanes: int, lane_
     full_width = lanes * lane_width + 2 * shoulder
     self_hit_margin = full_width * SELF_HIT_MARGIN_FACTOR
 
-    # Number of control points: fewer for more lanes
-    num_ctrl = int(np.interp(lanes, [LANE_COUNT_MIN, LANE_COUNT_MAX], [MAX_CTRL_POINTS, MIN_CTRL_POINTS]))
+    # Number of control points: more for fewer lanes
+    num_ctrl_target = int(np.interp(lanes, [LANE_COUNT_MIN, LANE_COUNT_MAX], [MAX_CTRL_POINTS, MIN_CTRL_POINTS]))
 
-    # Deviation scale: smaller for more lanes
-    dev_scale = CTRL_DEVIATION_SCALE * (1 - (lanes - 1) / (LANE_COUNT_MAX - 1))
+    # Deviation scale: larger for fewer lanes
+    rel = (lanes - 1) / (LANE_COUNT_MAX - 1)
+    dev_scale_x = max(MIN_DEV_SCALE, CTRL_DEVIATION_SCALE_X * (1 - rel))
+    dev_scale_z = max(MIN_DEV_SCALE, CTRL_DEVIATION_SCALE_Z * (1 - rel))
 
     path = None
-    for try_i in range(GEN_MAX_TRIES):
-        # Generate random control points
-        ctrl_points = [np.array([x, z])]
+    for _ in range(GEN_MAX_TRIES):
+        ctrl_points = [np.array([x, 0.0])]
         prev_x = x
-        for i in range(1, num_ctrl + 1):
-            z_next = i * size / num_ctrl
-            x_dev = rng.uniform(-dev_scale * size, dev_scale * size)
+        prev_z = 0.0
+        z_advance = size / num_ctrl_target
+        while len(ctrl_points) < num_ctrl_target * MAX_CTRL_FACTOR and prev_z < size:
+            x_dev = rng.uniform(-dev_scale_x * size, dev_scale_x * size)
+            z_dev = rng.uniform(-BACKTRACK_FACTOR * z_advance, z_advance)
             x_next = np.clip(prev_x + x_dev, SIDE_MARGIN * size, (1 - SIDE_MARGIN) * size)
+            z_next = prev_z + z_advance + z_dev
+            if z_next > size:
+                z_next = size
             ctrl_points.append(np.array([x_next, z_next]))
             prev_x = x_next
+            prev_z = z_next
+        if prev_z < size or len(ctrl_points) < 2:
+            continue
 
-        # Spline the control points for smooth path
-        xs_ctrl = [p[0] for p in ctrl_points]
-        zs_ctrl = [p[1] for p in ctrl_points]
-        cs = CubicSpline(zs_ctrl, xs_ctrl, bc_type='natural')
+        # Parameterize by arc length
+        ctrl_array = np.array(ctrl_points)
+        ds = np.linalg.norm(np.diff(ctrl_array, axis=0), axis=1)
+        s = np.cumsum(np.concatenate(([0.0], ds)))
+        cs_x = CubicSpline(s, ctrl_array[:, 0], bc_type='natural')
+        cs_z = CubicSpline(s, ctrl_array[:, 1], bc_type='natural')
 
-        # Resample densely along z
-        z_sample = np.linspace(0, size, int(size / RESAMPLE_STEP) + 1)
-        x_sample = cs(z_sample)
-        candidate_path = [np.array([x, z]) for x, z in zip(x_sample, z_sample)]
+        # Resample densely
+        s_sample = np.linspace(0, s[-1], int(s[-1] / RESAMPLE_STEP) + 1)
+        x_sample = cs_x(s_sample)
+        z_sample = cs_z(s_sample)
+        candidate_path = [np.array([x_val, z_val]) for x_val, z_val in zip(x_sample, z_sample)]
 
-        # Smooth the x (horizontal) for better curves
-        density_factor = CTRL_SEG_LEN / RESAMPLE_STEP
-        path_smooth_sigma_dense = PATH_SMOOTH_SIGMA_MIN + (PATH_SMOOTH_SIGMA_MAX - PATH_SMOOTH_SIGMA_MIN) * ((lanes - LANE_COUNT_MIN) / (LANE_COUNT_MAX - LANE_COUNT_MIN))
-        path_smooth_sigma_dense *= density_factor
-        xs_smooth = gaussian_filter1d(x_sample, path_smooth_sigma_dense)
-        candidate_path = [np.array([x, z]) for x, z in zip(xs_smooth, z_sample)]
+        # Smooth the path
+        path_smooth_sigma_dense = np.interp(lanes, [LANE_COUNT_MIN, LANE_COUNT_MAX], [PATH_SMOOTH_SIGMA_MIN, PATH_SMOOTH_SIGMA_MAX])
+        if path_smooth_sigma_dense > 0.001:
+            xs_smooth = gaussian_filter1d(x_sample, path_smooth_sigma_dense)
+            zs_smooth = gaussian_filter1d(z_sample, path_smooth_sigma_dense)
+            candidate_path = [np.array([x, z]) for x, z in zip(xs_smooth, zs_smooth)]
 
-        # Check for self-overlap on resampled path (check every 10th to speed up)
-        check_path = candidate_path[::10]
+        # Check for self-overlap
+        check_skip = 5
+        check_path = candidate_path[::check_skip]
         ok = True
-        for i in range(len(check_path) - 1):
-            for j in range(i + 2, len(check_path) - 1):
-                if _seg_intersect(check_path[i], check_path[i+1], check_path[j], check_path[j+1]) or _too_close(check_path[i+1], check_path[j], check_path[j+1], self_hit_margin):
+        n = len(check_path)
+        for i in range(n - 1):
+            for j in range(i + 20, n - 1):  # skip nearby segments
+                if _seg_intersect(check_path[i], check_path[i+1], check_path[j], check_path[j+1]):
+                    ok = False
+                    break
+                if _too_close(check_path[i+1], check_path[j], check_path[j+1], self_hit_margin):
                     ok = False
                     break
             if not ok:
@@ -204,8 +242,8 @@ def _generate_bottom_to_top(terrain, rng: np.random.Generator, lanes: int, lane_
         if not ok:
             continue
 
-        # Check minimum radius on subsample
-        if not _estimate_min_radius(check_path, min_rad):
+        # Check minimum radius
+        if not _estimate_min_radius(candidate_path, min_rad):
             continue
 
         path = candidate_path
@@ -215,7 +253,7 @@ def _generate_bottom_to_top(terrain, rng: np.random.Generator, lanes: int, lane_
         # Fall back to straight path
         z_sample = np.linspace(0, size, int(size / RESAMPLE_STEP) + 1)
         x_sample = np.full_like(z_sample, x)
-        path = [np.array([x_val, z]) for x_val, z in zip(x_sample, z_sample)]
+        path = [np.array([x_val, z_val]) for x_val, z_val in zip(x_sample, z_sample)]
 
     return path
 
@@ -373,7 +411,9 @@ def add_random_road(
     shoulder = float(rng.uniform(SHOULDER_MIN, SHOULDER_MAX))
     ditch_width = float(rng.uniform(DITCH_WIDTH_MIN, DITCH_WIDTH_MAX))
     ditch_depth = float(rng.uniform(DITCH_DEPTH_MIN, DITCH_DEPTH_MAX))
-    road_height = float(rng.uniform(ROAD_HEIGHT_MIN, ROAD_HEIGHT_MAX))
+    road_height_min = ROAD_HEIGHT_MIN_BY_LANES.get(lanes, 1.0)
+    road_height_max = ROAD_HEIGHT_MAX_BY_LANES.get(lanes, 3.0)
+    road_height = float(rng.uniform(road_height_min, road_height_max))
     cross_pitch = math.radians(float(rng.uniform(CROSS_PITCH_MIN_DEG, CROSS_PITCH_MAX_DEG)))
 
     noise_f = float(rng.uniform(NOISE_FREQ_MIN, NOISE_FREQ_MAX))
@@ -387,6 +427,31 @@ def add_random_road(
         bump_amp *= 0.25  # holey, few bumps
 
     path = _generate_bottom_to_top(terrain, rng, lanes, lane_width, shoulder)
+
+    path_arr = np.array(path)
+    ds = np.linalg.norm(np.diff(path_arr, axis=0), axis=1)
+    path_length = np.sum(ds)
+    sinuosity = path_length / terrain.size if terrain.size > 0 else 1.0
+
+    heights_orig = terrain.heights.copy()
+    h_min = np.min(heights_orig)
+    h_max = np.max(heights_orig)
+
+    min_rad = MIN_RADIUS_BY_LANES.get(lanes, 65.0) * (lane_width / MIN_RADIUS_SCALE_WITH_LANEWIDTH)
+
+    # Print road plan
+    print("Generating road plan:")
+    print(f"  Lanes: {lanes}")
+    print(f"  Lane width: {lane_width:.2f} m")
+    print(f"  Shoulder width: {shoulder:.2f} m")
+    print(f"  Road height above terrain: {road_height:.2f} m")
+    print(f"  Cross pitch: {math.degrees(cross_pitch):.2f} deg")
+    print(f"  Ditch width: {ditch_width:.2f} m")
+    print(f"  Ditch depth: {ditch_depth:.2f} m")
+    print(f"  Minimum curve radius: {min_rad:.2f} m")
+    print(f"  Number of road points: {len(path)}")
+    print(f"  Sinuosity: {sinuosity:.2f}")
+    print(f"  Terrain height range: {h_min:.2f} to {h_max:.2f} m")
 
     _stamp_road(
         terrain,
@@ -449,7 +514,7 @@ def get_safe_start_position_and_rot(terrain, road_points: List[Tuple[float, floa
 
 
 # ---------------------------------------------------------------------------
-# Rendering mesh (gray surface + green skirts)
+# Rendering mesh (gray surface + green skirts + lane markings)
 
 
 def build_road_vertices(
@@ -466,9 +531,6 @@ def build_road_vertices(
     if ditch_width is None:
         ditch_width = DITCH_WIDTH_MAX
 
-    ROAD_COL = [0.55, 0.55, 0.55, 1.0]
-    SKIRT_COL = [34 / 255, 139 / 255, 34 / 255, 1.0]
-
     def base_height(x: float, z: float) -> float:
         return float(terrain.get_height(x, z))
 
@@ -481,14 +543,46 @@ def build_road_vertices(
     gray_offsets = np.linspace(-half_plus_sh, half_plus_sh, max(6, lanes * 3 + 3))
     skirt_offsets = [half_plus_sh + (j + 1) * (ditch_width / SKIRT_RINGS) for j in range(SKIRT_RINGS)]
 
+    # Compute cumulative distance along path
+    s = [0.0]
+    for p_prev, p_curr in zip(path[:-1], path[1:]):
+        dist = math.sqrt((p_curr[0] - p_prev[0])**2 + (p_curr[1] - p_prev[1])**2)
+        s.append(s[-1] + dist)
+
+    # Define lane marking lines: (offset, color, dotted)
+    lines_list = []
+    left_edge_off = -half_plus_sh
+    right_edge_off = half_plus_sh
+    left_edge_col = YELLOW_COL if lanes == 1 else WHITE_COL
+    lines_list.append((left_edge_off, left_edge_col, False))
+    for k in range(1, lanes):
+        off = -half_road + k * lane_width
+        is_yellow = False
+        if lanes % 2 == 0:
+            if abs(off) < 1e-3:  # center
+                is_yellow = True
+        else:
+            if lanes > 1:
+                mid_left = -half_road + (lanes // 2) * lane_width
+                mid_right = mid_left + lane_width
+                if abs(off - mid_left) < 1e-3 or abs(off - mid_right) < 1e-3:
+                    is_yellow = True
+        col = YELLOW_COL if is_yellow else WHITE_COL
+        dotted = not is_yellow
+        lines_list.append((off, col, dotted))
+    lines_list.append((right_edge_off, WHITE_COL, False))
+
     verts: list[float] = []
 
     def emit_quad(a, b, c, d, col):
         verts.extend(a + col); verts.extend(b + col); verts.extend(c + col)
         verts.extend(c + col); verts.extend(b + col); verts.extend(d + col)
 
-    for (p0, p1) in zip(path[:-1], path[1:]):
-        p0 = np.array(p0, float); p1 = np.array(p1, float)
+    path_np = [np.array(p, float) for p in path]
+    period = DASH_LENGTH + GAP_LENGTH
+    line_half = LINE_WIDTH / 2.0
+
+    for ii, (p0, p1) in enumerate(zip(path_np[:-1], path_np[1:])):
         seg = p1 - p0
         L = float(np.linalg.norm(seg))
         if L <= 1e-6:
@@ -498,17 +592,23 @@ def build_road_vertices(
 
         nsteps = max(2, int(L / along_step))
         for k in range(nsteps):
-            c0 = p0 + dir2 * (L * (k / nsteps))
-            c1 = p0 + dir2 * (L * ((k + 1) / nsteps))
+            frac0 = k / nsteps
+            frac1 = (k + 1) / nsteps
+            c0 = p0 + dir2 * (L * frac0)
+            c1 = p0 + dir2 * (L * frac1)
+
             deck0 = []
             deck1 = []
-            h0c = base_height(c0[0], c0[1])
-            h1c = base_height(c1[0], c1[1])
             for off in gray_offsets:
-                y0 = h0c - math.tan(cross_pitch) * abs(off)
-                y1 = h1c - math.tan(cross_pitch) * abs(off)
-                deck0.append([c0[0] + nrm2[0] * off, y0, c0[1] + nrm2[1] * off])
-                deck1.append([c1[0] + nrm2[0] * off, y1, c1[1] + nrm2[1] * off])
+                x0 = c0[0] + nrm2[0] * off
+                z0 = c0[1] + nrm2[1] * off
+                y0 = base_height(x0, z0) + ROAD_EPS
+                deck0.append([x0, y0, z0])
+
+                x1 = c1[0] + nrm2[0] * off
+                z1 = c1[1] + nrm2[1] * off
+                y1 = base_height(x1, z1) + ROAD_EPS
+                deck1.append([x1, y1, z1])
             for j in range(len(gray_offsets) - 1):
                 emit_quad(deck0[j], deck0[j + 1], deck1[j], deck1[j + 1], ROAD_COL)
 
@@ -517,19 +617,122 @@ def build_road_vertices(
                 edge_idx = -1 if side > 0 else 0
                 ring_prev0 = deck0[edge_idx]
                 ring_prev1 = deck1[edge_idx]
-                edge_y0 = ring_prev0[1]
-                edge_y1 = ring_prev1[1]
-                for j, off in enumerate(skirt_offsets):
+                edge_y0 = ring_prev0[1] - ROAD_EPS  # subtract eps to compute blend, then add back
+                edge_y1 = ring_prev1[1] - ROAD_EPS
+                for j in range(SKIRT_RINGS):
+                    off = skirt_offsets[j]
                     d = off * side
                     x0 = c0[0] + nrm2[0] * d; z0 = c0[1] + nrm2[1] * d
                     x1 = c1[0] + nrm2[0] * d; z1 = c1[1] + nrm2[1] * d
                     t = (off - half_plus_sh) / max(ditch_width, 1e-6)
                     t = min(max(t, 0.0), 1.0)
-                    y0 = (1 - t) * edge_y0 + t * float(terrain.get_height(x0, z0))
-                    y1 = (1 - t) * edge_y1 + t * float(terrain.get_height(x1, z1))
+                    y0 = (1 - t) * edge_y0 + t * float(base_height(x0, z0)) + ROAD_EPS
+                    y1 = (1 - t) * edge_y1 + t * float(base_height(x1, z1)) + ROAD_EPS
                     ring0 = [x0, y0, z0]
                     ring1 = [x1, y1, z1]
                     emit_quad(ring_prev0, ring0, ring_prev1, ring1, SKIRT_COL)
                     ring_prev0, ring_prev1 = ring0, ring1
 
+            # lane markings (per sub-segment)
+            sub_s0 = s[ii] + frac0 * L
+            sub_s1 = s[ii] + frac1 * L
+            mid_sub_s = (sub_s0 + sub_s1) / 2.0
+            for off, col, dotted in lines_list:
+                should_emit = True
+                if dotted:
+                    mod = mid_sub_s % period
+                    should_emit = mod < DASH_LENGTH
+                if should_emit:
+                    left_off = off - line_half
+                    right_off = off + line_half
+
+                    xl0 = c0[0] + nrm2[0] * left_off
+                    zl0 = c0[1] + nrm2[1] * left_off
+                    yl0 = base_height(xl0, zl0) + ROAD_EPS
+                    vert_l0 = [xl0, yl0, zl0]
+
+                    xr0 = c0[0] + nrm2[0] * right_off
+                    zr0 = c0[1] + nrm2[1] * right_off
+                    yr0 = base_height(xr0, zr0) + ROAD_EPS
+                    vert_r0 = [xr0, yr0, zr0]
+
+                    xl1 = c1[0] + nrm2[0] * left_off
+                    zl1 = c1[1] + nrm2[1] * left_off
+                    yl1 = base_height(xl1, zl1) + ROAD_EPS
+                    vert_l1 = [xl1, yl1, zl1]
+
+                    xr1 = c1[0] + nrm2[0] * right_off
+                    zr1 = c1[1] + nrm2[1] * right_off
+                    yr1 = base_height(xr1, zr1) + ROAD_EPS
+                    vert_r1 = [xr1, yr1, zr1]
+
+                    emit_quad(vert_l0, vert_r0, vert_l1, vert_r1, col)
+
     return np.array(verts, dtype="f4")
+
+
+# ---------------------------------------------------------------------------
+# Mini-map generation
+
+
+def generate_mini_map(terrain, path: List[Tuple[float, float]], params: dict, car_pos: np.ndarray) -> np.ndarray:
+    """Generate a 250x250 RGB mini-map image using pure NumPy."""
+    size = terrain.size
+    mini_size = 250
+    x_mini = np.linspace(0, size, mini_size)
+    xx, zz = np.meshgrid(x_mini, x_mini)
+
+    # Terrain heights downsampled
+    x_orig = np.linspace(0, size, terrain.res)
+    spline = RectBivariateSpline(x_orig, x_orig, terrain.heights, kx=1, ky=1)
+    heights_low = spline(xx, zz)
+
+    h_min = np.min(heights_low)
+    h_max = np.max(heights_low)
+    if h_max > h_min:
+        green = 50 + 150 * (heights_low - h_min) / (h_max - h_min)
+    else:
+        green = np.full_like(heights_low, 100)
+    img = np.zeros((mini_size, mini_size, 3), dtype=np.uint8)
+    img[:, :, 1] = green.astype(np.uint8)
+
+    # Road: gray where distance to path <= half road width
+    full_width = params['lanes'] * params['lane_width'] + 2 * params['shoulder']
+    half_width = full_width / 2.0
+    path_arr = np.array(path)
+
+    min_d = np.full((mini_size, mini_size), np.inf)
+    for k in range(len(path_arr) - 1):
+        ax, az = path_arr[k]
+        bx, bz = path_arr[k + 1]
+        dx = bx - ax
+        dz = bz - az
+        len2 = dx**2 + dz**2
+        if len2 < 1e-6:
+            continue
+        px = xx - ax
+        pz = zz - az
+        t = (px * dx + pz * dz) / len2
+        t = np.clip(t, 0, 1)
+        closest_x = ax + t * dx
+        closest_z = az + t * dz
+        dist = np.sqrt((xx - closest_x)**2 + (zz - closest_z)**2)
+        min_d = np.minimum(min_d, dist)
+
+    road_mask = min_d <= half_width
+    img[road_mask] = [100, 100, 100]  # gray
+
+    # Car: yellow circle
+    car_x, car_z = car_pos[0], car_pos[2]
+    ix = int((car_x / size) * (mini_size - 1))
+    iz = int((car_z / size) * (mini_size - 1))
+    radius = 2  # pixels
+    for di in range(-radius, radius + 1):
+        for dz in range(-radius, radius + 1):
+            if di**2 + dz**2 <= radius**2:
+                cx = ix + di
+                cz = iz + dz
+                if 0 <= cx < mini_size and 0 <= cz < mini_size:
+                    img[cz, cx] = [255, 255, 0]  # yellow
+
+    return img
