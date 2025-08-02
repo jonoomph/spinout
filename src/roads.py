@@ -301,6 +301,7 @@ def _stamp_road(
     hole_amp: float,
     noise_f: float,
     rng: np.random.Generator,
+    road_friction: float,
 ) -> None:
     half_road = 0.5 * lane_width * lanes
     half_plus_sh = half_road + shoulder
@@ -355,6 +356,8 @@ def _stamp_road(
                 n = pnoise2(x * noise_f + noise_dx, z * noise_f + noise_dz)
                 ht += (n * bump_amp) if n >= 0 else (n * hole_amp)
                 terrain.heights[ix, iz] = ht
+                # mark road friction separately so terrain friction doesn't bleed through
+                terrain.road_friction[ix, iz] = road_friction
             else:
                 t = (dist - half_plus_sh) / max(ditch_width, 1e-6)
                 t = min(max(t, 0.0), 1.0)
@@ -386,6 +389,12 @@ def _stamp_road(
 def add_random_road(
     terrain,
     rng: np.random.Generator | None = None,
+    road_type: str = "asphalt",
+    weather: str = "dry",
+    terrain_type: str = "grass",
+    road_color=ROAD_COL,
+    skirt_color=SKIRT_COL,
+    road_friction: float = 1.0,
 ) -> Tuple[List[Tuple[float, float]], dict]:
     if rng is None:
         rng = np.random.default_rng()
@@ -403,6 +412,10 @@ def add_random_road(
         z_new = x_new
         spline = RectBivariateSpline(x_old, z_old, terrain.heights.T, kx=3, ky=3)
         terrain.heights = spline(x_new, z_new).T
+        spline_fric = RectBivariateSpline(x_old, z_old, terrain.surface_friction.T, kx=1, ky=1)
+        terrain.surface_friction = spline_fric(x_new, z_new).T
+        spline_road = RectBivariateSpline(x_old, z_old, terrain.road_friction.T, kx=1, ky=1)
+        terrain.road_friction = spline_road(x_new, z_new).T
         terrain.res = new_res
         terrain.cell_size = new_cell
 
@@ -441,6 +454,11 @@ def add_random_road(
 
     # Print road plan
     print("Generating road plan:")
+    print(f"  Weather: {weather}")
+    print(f"  Road type: {road_type} (friction {road_friction:.2f})")
+    print(
+        f"  Terrain type: {terrain_type} (friction {terrain.base_friction:.2f})"
+    )
     print(f"  Lanes: {lanes}")
     print(f"  Lane width: {lane_width:.2f} m")
     print(f"  Shoulder width: {shoulder:.2f} m")
@@ -467,6 +485,7 @@ def add_random_road(
         hole_amp,
         noise_f,
         rng,
+        road_friction,
     )
 
     params = {
@@ -476,6 +495,8 @@ def add_random_road(
         "road_height": road_height,
         "cross_pitch": cross_pitch,
         "ditch_width": ditch_width,
+        "road_color": road_color,
+        "skirt_color": skirt_color,
     }
     return [(float(p[0]), float(p[1])) for p in path], params
 
@@ -526,6 +547,8 @@ def build_road_vertices(
     road_height: float,
     cross_pitch: float,
     ditch_width: float | None = None,
+    road_color=ROAD_COL,
+    skirt_color=SKIRT_COL,
     **_: dict,
 ) -> np.ndarray:
     if ditch_width is None:
@@ -610,7 +633,7 @@ def build_road_vertices(
                 y1 = base_height(x1, z1) + ROAD_EPS
                 deck1.append([x1, y1, z1])
             for j in range(len(gray_offsets) - 1):
-                emit_quad(deck0[j], deck0[j + 1], deck1[j], deck1[j + 1], ROAD_COL)
+                emit_quad(deck0[j], deck0[j + 1], deck1[j], deck1[j + 1], road_color)
 
             # skirts on each side
             for side in (-1.0, +1.0):
@@ -630,7 +653,7 @@ def build_road_vertices(
                     y1 = (1 - t) * edge_y1 + t * float(base_height(x1, z1)) + ROAD_EPS
                     ring0 = [x0, y0, z0]
                     ring1 = [x1, y1, z1]
-                    emit_quad(ring_prev0, ring0, ring_prev1, ring1, SKIRT_COL)
+                    emit_quad(ring_prev0, ring0, ring_prev1, ring1, skirt_color)
                     ring_prev0, ring_prev1 = ring0, ring1
 
             # lane markings (per sub-segment)

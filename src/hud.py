@@ -12,6 +12,7 @@ def render_hud(
     car_info="",
     rpm=None,
     gear=None,
+    surface_info=None,
 ):
     hud_surf.fill((0, 0, 0, 0))
     if rpm is not None and gear is not None:
@@ -35,3 +36,6 @@ def render_hud(
     hud_surf.blit(text_physics_fps, (10, 70))
     hud_surf.blit(text_steer, (10, 100))
     hud_surf.blit(text_car, (10, 130))
+    if surface_info:
+        text_surface = font.render(surface_info, True, (255, 255, 255, 255))
+        hud_surf.blit(text_surface, (10, 160))

@@ -187,12 +187,27 @@ class PowerTrain:
 
 
 class Terrain:
-    def __init__(self, size=400, res=50, height_scale=100, sigma=5):
+    def __init__(
+        self,
+        size=400,
+        res=50,
+        height_scale=100,
+        sigma=5,
+        terrain_type="grass",
+        color=None,
+        friction=1.0,
+    ):
         self.size = size
         self.res = res
         self.cell_size = size / (res - 1)
         noise = np.random.uniform(-height_scale, height_scale, (res, res))
         self.heights = gaussian_filter(noise, sigma=sigma)
+        self.terrain_type = terrain_type
+        self.color = color or [34 / 255, 139 / 255, 34 / 255, 1.0]
+        self.base_friction = friction
+        self.surface_friction = np.full((res, res), friction, dtype=float)
+        # Separate map for road friction so terrain choice does not affect roads
+        self.road_friction = np.zeros((res, res), dtype=float)
 
     def get_height(self, x, z):
         if x < 0 or x > self.size or z < 0 or z > self.size:
@@ -220,6 +235,16 @@ class Terrain:
         if norm == 0 or not np.isfinite(norm):
             return np.array([0.0, 1.0, 0.0])
         return normal / norm
+
+    def get_friction(self, x, z):
+        if x < 0 or x > self.size or z < 0 or z > self.size:
+            return self.base_friction
+        ix = min(max(int(x / self.cell_size), 0), self.res - 1)
+        iz = min(max(int(z / self.cell_size), 0), self.res - 1)
+        road_mu = self.road_friction[ix, iz]
+        if road_mu > 0:
+            return float(road_mu)
+        return float(self.surface_friction[ix, iz])
 
 
 class Car:
@@ -433,6 +458,7 @@ class Car:
         lat_f = -80000 * alpha
         is_static = self.brake > 0 and abs(long_v) < 0.3 and abs(wheel.ang_vel) < 0.1
         mu = 1.4 if is_static else 1.2
+        mu *= self.terrain.get_friction(pos[0], pos[2])
         width_factor = wheel.width / 0.2
         max_fric = mu * load * width_factor
         gravity_pw = g_front if wheel.is_front else g_rear
@@ -492,7 +518,12 @@ class Car:
             self.body.apply_force(normal * n_force, pos)
             contact_vel = vel - normal * np.dot(vel, normal)
             fric_dir = -contact_vel / (np.linalg.norm(contact_vel) + 0.01)
-            fric_force = fric_dir * n_force * 0.8
+            fric_force = (
+                fric_dir
+                * n_force
+                * 0.8
+                * self.terrain.get_friction(pos[0], pos[2])
+            )
             self.body.apply_force(fric_force, pos)
 
     def update(self, dt):

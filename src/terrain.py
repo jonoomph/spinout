@@ -3,7 +3,7 @@ import numpy as np
 
 def build_terrain_vertices(terrain):
     vertices = []
-    terrain_color = [34/255, 139/255, 34/255, 1.0]
+    terrain_color = terrain.color
     for i in range(terrain.res - 1):
         for j in range(terrain.res - 1):
             x1 = i * terrain.cell_size

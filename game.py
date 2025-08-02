@@ -3,6 +3,8 @@ import pygame
 from pygame.locals import *
 import time
 import numpy as np
+import json
+
 from src.physics import Terrain, Car, Quaternion
 from src.roads import add_random_road, build_road_vertices, get_safe_start_position_and_rot
 from src.controls import get_controls
@@ -11,7 +13,37 @@ from src.render import RenderContext
 from src.utils import compute_mvp
 from src.terrain import build_terrain_vertices
 from src.car import collect_car_vertices
-import json
+
+
+WEATHER_MODIFIERS = {"dry": 1.0, "wet": 0.7}
+
+ROAD_TYPES = {
+    "asphalt": {"color": [0.3, 0.3, 0.3, 1.0], "friction": 1.0},
+    "concrete": {"color": [0.7, 0.7, 0.7, 1.0], "friction": 0.95},
+    "gravel": {"color": [0.36, 0.25, 0.2, 1.0], "friction": 0.8},
+}
+
+TERRAIN_TYPES = {
+    "grass": {"color": [34 / 255, 139 / 255, 34 / 255, 1.0], "friction": 0.7},
+    "sand": {"color": [0.76, 0.70, 0.50, 1.0], "friction": 0.6},
+    "snow": {"color": [1.0, 1.0, 1.0, 1.0], "friction": 0.5},
+}
+
+
+def show_loading(progress, message, screen, font):
+    width, height = screen.get_size()
+    screen.fill((0, 0, 0))
+    bar_w = int(width * 0.6)
+    bar_h = 40
+    x = (width - bar_w) // 2
+    y = (height - bar_h) // 2
+    pygame.draw.rect(screen, (255, 255, 255), (x, y, bar_w, bar_h), 2)
+    inner_w = int(bar_w * progress)
+    pygame.draw.rect(screen, (255, 255, 255), (x, y, inner_w, bar_h))
+    text = font.render(message, True, (255, 255, 255))
+    text_rect = text.get_rect(center=(width // 2, y - 30))
+    screen.blit(text, text_rect)
+    pygame.display.flip()
 
 pygame.init()
 width, height = 1854, 1168
@@ -19,13 +51,50 @@ screen = pygame.display.set_mode((width, height), pygame.OPENGL | pygame.DOUBLEB
 pygame.display.set_caption("Simple Car Driving Sim")
 clock = pygame.time.Clock()
 
+loading_font = pygame.font.SysFont(None, 48)
+rng = np.random.default_rng()
+
+weather = rng.choice(["dry", "wet"], p=[0.7, 0.3])
+road_type = rng.choice(["asphalt", "concrete", "gravel"], p=[0.7, 0.2, 0.1])
+terrain_type = rng.choice(["grass", "sand", "snow"], p=[0.7, 0.15, 0.15])
+
+weather_mod = WEATHER_MODIFIERS[weather]
+road_info = ROAD_TYPES[road_type]
+terrain_info = TERRAIN_TYPES[terrain_type]
+surface_info = f"Terrain: {terrain_type.title()}, Road: {weather.title()} {road_type.title()}"
+
+show_loading(0.2, "Generating terrain...", screen, loading_font)
+terrain = Terrain(
+    size=800,
+    res=200,
+    terrain_type=terrain_type,
+    color=terrain_info["color"],
+    friction=terrain_info["friction"] * weather_mod,
+)
+
+show_loading(0.5, "Laying roads...", screen, loading_font)
+road_points, road_params = add_random_road(
+    terrain,
+    rng=rng,
+    road_type=road_type,
+    weather=weather,
+    terrain_type=terrain_type,
+    road_color=road_info["color"],
+    skirt_color=terrain.color,
+    road_friction=road_info["friction"] * weather_mod,
+)
+
+show_loading(0.8, "Building meshes...", screen, loading_font)
 render_ctx = RenderContext(width, height)
-terrain = Terrain(size=800, res=200)
-road_points, road_params = add_random_road(terrain)
 road_vbo = render_ctx.ctx.buffer(
     build_road_vertices(terrain, road_points, **road_params).tobytes()
 )
 road_vao = render_ctx.ctx.vertex_array(render_ctx.prog, road_vbo, 'in_vert', 'in_color')
+terrain_vbo = render_ctx.ctx.buffer(build_terrain_vertices(terrain).tobytes())
+terrain_vao = render_ctx.ctx.vertex_array(render_ctx.prog, terrain_vbo, 'in_vert', 'in_color')
+
+show_loading(1.0, "Starting engines...", screen, loading_font)
+time.sleep(0.5)
 
 # Load cars from JSON
 with open("data/cars.json", "r") as f:
@@ -39,9 +108,6 @@ car = Car(terrain, cars_data[current_car_index])
 car_pos, car_rot = get_safe_start_position_and_rot(terrain, road_points, 5.0)
 car.body.pos = car_pos
 car.body.rot = car_rot
-
-terrain_vbo = render_ctx.ctx.buffer(build_terrain_vertices(terrain).tobytes())
-terrain_vao = render_ctx.ctx.vertex_array(render_ctx.prog, terrain_vbo, 'in_vert', 'in_color')
 
 running = True
 font = pygame.font.SysFont(None, 24)
@@ -97,7 +163,11 @@ while running:
     steer_angle = car.wheels[0].steer_angle if car.wheels[0].is_front else 0
     hud_surf = pygame.Surface((width, height), pygame.SRCALPHA)
     hud_surf.fill((0, 0, 0, 0))
-    car_info = f"Car: {cars_data[current_car_index]['make']} {cars_data[current_car_index]['model']} ({cars_data[current_car_index]['year']})"
+    car_info = (
+        f"Car: {cars_data[current_car_index]['make']} "
+        f"{cars_data[current_car_index]['model']} "
+        f"({cars_data[current_car_index]['year']})"
+    )
     render_hud(
         hud_surf,
         font,
@@ -108,6 +178,7 @@ while running:
         car_info,
         rpm=car.engine_rpm,
         gear=car.current_gear,
+        surface_info=surface_info,
     )
     render_ctx.render_hud(hud_surf)
 
