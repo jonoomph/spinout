@@ -6,7 +6,8 @@ import numpy as np
 import json
 
 from src.physics import Terrain, Car, Quaternion
-from src.roads import add_random_road, build_road_vertices, get_safe_start_position_and_rot
+from src.roads.plan import generate_plan, get_safe_start_position_and_rot
+from src.roads.build import apply_plan, build_road_vertices
 from src.controls import get_controls
 from src.hud import render_hud
 from src.render import RenderContext
@@ -73,7 +74,7 @@ terrain = Terrain(
 )
 
 show_loading(0.5, "Laying roads...", screen, loading_font)
-road_points, road_params = add_random_road(
+road_points, road_plan = generate_plan(
     terrain,
     rng=rng,
     road_type=road_type,
@@ -83,11 +84,12 @@ road_points, road_params = add_random_road(
     skirt_color=terrain.color,
     road_friction=road_info["friction"] * weather_mod,
 )
+apply_plan(terrain, road_points, road_plan, rng=rng)
 
 show_loading(0.8, "Building meshes...", screen, loading_font)
 render_ctx = RenderContext(width, height)
 road_vbo = render_ctx.ctx.buffer(
-    build_road_vertices(terrain, road_points, **road_params).tobytes()
+    build_road_vertices(terrain, road_points, **road_plan).tobytes()
 )
 road_vao = render_ctx.ctx.vertex_array(render_ctx.prog, road_vbo, 'in_vert', 'in_color')
 terrain_vbo = render_ctx.ctx.buffer(build_terrain_vertices(terrain).tobytes())
