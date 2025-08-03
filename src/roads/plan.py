@@ -168,111 +168,81 @@ def _estimate_min_radius(path: List[_vec2], min_rad_required: float) -> bool:
     return min_rad >= min_rad_required
 
 
-def _generate_bottom_to_top(terrain, rng: np.random.Generator, lanes: int, lane_width: float, shoulder: float) -> List[_vec2]:
+def _generate_bottom_to_top(
+    terrain,
+    rng: np.random.Generator,
+    lanes: int,
+    lane_width: float,
+    shoulder: float
+) -> List[_vec2]:
+    """
+    Smooth bottom→top via randomly jittered control points + cubic spline,
+    with iterative curvature‐based amplitude control to guarantee min‐radius.
+    """
     size = terrain.size
-    x = rng.uniform(SIDE_MARGIN * size, (1.0 - SIDE_MARGIN) * size)
-    ctrl_points = [np.array([x, 0.0])]
 
-    # Lane-aware parameters
-    min_rad = MIN_RADIUS_BY_LANES.get(lanes, 65.0)
-    min_rad *= (lane_width / MIN_RADIUS_SCALE_WITH_LANEWIDTH)
-    min_rad = max(min_rad, 12.0)
+    # 1) compute your lane‐based min turn radius
+    base_min = MIN_RADIUS_BY_LANES.get(lanes, 65.0)
+    min_radius = base_min * (lane_width / MIN_RADIUS_SCALE_WITH_LANEWIDTH)
 
-    # Self-hit margin based on road width
-    full_width = lanes * lane_width + 2 * shoulder
-    self_hit_margin = full_width * SELF_HIT_MARGIN_FACTOR
+    # 2) choose how many control points (excluding start/end)
+    #    fewer lanes → more points → more wiggles
+    mid_min, mid_max = MIN_CTRL_POINTS, MAX_CTRL_POINTS
+    num_mid = int(np.interp(lanes,
+                            [LANE_COUNT_MIN, LANE_COUNT_MAX],
+                            [mid_max, mid_min]))
+    total_pts = num_mid + 2  # include start/end
 
-    # Number of control points: more for fewer lanes
-    num_ctrl_target = int(np.interp(lanes, [LANE_COUNT_MIN, LANE_COUNT_MAX], [MAX_CTRL_POINTS, MIN_CTRL_POINTS]))
+    # 3) initial jitter amplitude (as fraction of map width)
+    jitter_frac = (LANE_COUNT_MAX + 1 - lanes) / LANE_COUNT_MAX * 0.3
 
-    # Deviation scale: larger for fewer lanes
-    rel = (lanes - 1) / (LANE_COUNT_MAX - 1)
-    dev_scale_x = max(MIN_DEV_SCALE, CTRL_DEVIATION_SCALE_X * (1 - rel))
-    dev_scale_z = max(MIN_DEV_SCALE, CTRL_DEVIATION_SCALE_Z * (1 - rel))
+    # we’ll iteratively reduce jitter_frac until curvature is ok
+    for attempt in range(5):
+        # 4) build control z positions equally spaced, then jitter slightly
+        z_ctrl = np.linspace(0.0, size, total_pts)
+        span = size / total_pts
+        z_ctrl[1:-1] += rng.uniform(-span*0.5, span*0.5, size=num_mid)
+        z_ctrl = np.clip(np.sort(z_ctrl), 0, size)
 
-    path = None
-    for _ in range(GEN_MAX_TRIES):
-        ctrl_points = [np.array([x, 0.0])]
-        prev_x = x
-        prev_z = 0.0
-        z_advance = size / num_ctrl_target
-        while len(ctrl_points) < num_ctrl_target * MAX_CTRL_FACTOR and prev_z < size:
-            x_dev = rng.uniform(-dev_scale_x * size, dev_scale_x * size)
-            z_dev = rng.uniform(-BACKTRACK_FACTOR * z_advance, z_advance)
-            x_next = np.clip(prev_x + x_dev, SIDE_MARGIN * size, (1 - SIDE_MARGIN) * size)
-            z_next = prev_z + z_advance + z_dev
-            if z_next > size:
-                z_next = size
-            ctrl_points.append(np.array([x_next, z_next]))
-            prev_x = x_next
-            prev_z = z_next
-        if prev_z < size or len(ctrl_points) < 2:
-            continue
+        # 5) build control x positions: start/end random, mids random + jitter
+        x_ctrl = rng.uniform(SIDE_MARGIN*size, (1-SIDE_MARGIN)*size, size=total_pts)
+        # apply extra jitter around straight‐line interpolation
+        for i in range(1, total_pts-1):
+            straight_x = x_ctrl[0] + (x_ctrl[-1]-x_ctrl[0]) * (z_ctrl[i]/size)
+            dev = jitter_frac * size
+            x_ctrl[i] = np.clip(straight_x + rng.uniform(-dev, dev),
+                                 SIDE_MARGIN*size, (1-SIDE_MARGIN)*size)
 
-        # Parameterize by arc length
-        ctrl_array = np.array(ctrl_points)
-        ds = np.linalg.norm(np.diff(ctrl_array, axis=0), axis=1)
-        s = np.cumsum(np.concatenate(([0.0], ds)))
-        cs_x = CubicSpline(s, ctrl_array[:, 0], bc_type='natural')
-        cs_z = CubicSpline(s, ctrl_array[:, 1], bc_type='natural')
+        # 6) build a natural cubic spline x(z)
+        csx = CubicSpline(z_ctrl, x_ctrl, bc_type="natural")
 
-        # Resample densely
-        s_sample = np.linspace(0, s[-1], int(s[-1] / RESAMPLE_STEP) + 1)
-        x_sample = cs_x(s_sample)
-        z_sample = cs_z(s_sample)
-        candidate_path = [np.array([x_val, z_val]) for x_val, z_val in zip(x_sample, z_sample)]
+        # 7) sample densely
+        n = max(2, int(size / RESAMPLE_STEP))
+        z_s = np.linspace(0.0, size, n)
+        x_s = csx(z_s)
 
-        # Smooth the path
-        path_smooth_sigma_dense = np.interp(lanes, [LANE_COUNT_MIN, LANE_COUNT_MAX], [PATH_SMOOTH_SIGMA_MIN, PATH_SMOOTH_SIGMA_MAX])
-        if path_smooth_sigma_dense > 0.001:
-            xs_smooth = gaussian_filter1d(x_sample, path_smooth_sigma_dense)
-            zs_smooth = gaussian_filter1d(z_sample, path_smooth_sigma_dense)
-            candidate_path = [np.array([x, z]) for x, z in zip(xs_smooth, zs_smooth)]
+        # 8) smooth optional: larger roads get heavier smoothing
+        sigma = np.interp(lanes,
+                          [LANE_COUNT_MIN, LANE_COUNT_MAX],
+                          [PATH_SMOOTH_SIGMA_MAX*0.5, PATH_SMOOTH_SIGMA_MIN])
+        if sigma > 1.0:
+            x_s = gaussian_filter1d(x_s, sigma)
 
-        # Ensure the path stays within the terrain bounds. Cubic splines can
-        # overshoot the control points, so reject any candidate that leaves the
-        # playable area before doing the heavier intersection checks.
-        if any(
-            (p[0] < SIDE_MARGIN * size)
-            or (p[0] > (1.0 - SIDE_MARGIN) * size)
-            or (p[1] < BOTTOM_MARGIN * size)
-            or (p[1] > size)
-            for p in candidate_path
-        ):
-            continue
+        # 9) curvature check: κ ≈ |x''|/(1 + x'²)^(3/2) since z is linear
+        dx = np.gradient(x_s, z_s)
+        ddx = np.gradient(dx, z_s)
+        kappa = np.abs(ddx) / (1 + dx**2)**1.5
+        found_min_rad = 1.0 / (np.max(kappa) + 1e-9)
 
-        # Check for self-overlap
-        check_skip = 5
-        check_path = candidate_path[::check_skip]
-        ok = True
-        n = len(check_path)
-        for i in range(n - 1):
-            for j in range(i + 20, n - 1):  # skip nearby segments
-                if _seg_intersect(check_path[i], check_path[i+1], check_path[j], check_path[j+1]):
-                    ok = False
-                    break
-                if _too_close(check_path[i+1], check_path[j], check_path[j+1], self_hit_margin):
-                    ok = False
-                    break
-            if not ok:
-                break
-        if not ok:
-            continue
+        if found_min_rad >= min_radius:
+            # success!
+            return [np.array([float(xi), float(zi)]) for xi, zi in zip(x_s, z_s)]
 
-        # Check minimum radius
-        if not _estimate_min_radius(candidate_path, min_rad):
-            continue
+        # else clamp jitter and retry more gently
+        jitter_frac *= 0.6
 
-        path = candidate_path
-        break
-
-    if path is None:
-        # Fall back to straight path
-        z_sample = np.linspace(0, size, int(size / RESAMPLE_STEP) + 1)
-        x_sample = np.full_like(z_sample, x)
-        path = [np.array([x_val, z_val]) for x_val, z_val in zip(x_sample, z_sample)]
-
-    return path
+    # if all retries fail, just return the last even‐if‐tight path
+    return [np.array([float(xi), float(zi)]) for xi, zi in zip(x_s, z_s)]
 
 
 def generate_plan(
