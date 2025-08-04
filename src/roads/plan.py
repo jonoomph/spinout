@@ -181,81 +181,135 @@ def _estimate_min_radius(path: List[_vec2], min_rad_required: float) -> bool:
     return min_rad >= min_rad_required
 
 
+def _max_tail_heading_change(xs, ys, check_meters=300.0):
+    """Return max heading change (deg) in the last `check_meters` section of the spline."""
+    pts = np.column_stack([xs, ys])
+    y_span = ys[-1] - check_meters
+    indices = np.where(ys >= y_span)[0]
+    if len(indices) < 3:
+        indices = np.arange(len(xs))
+    pts = pts[indices]
+    v = np.diff(pts, axis=0)
+    headings = np.arctan2(v[:,1], v[:,0])
+    heading_diff = np.diff(headings)
+    heading_diff = (heading_diff + np.pi) % (2 * np.pi) - np.pi
+    return np.max(np.abs(np.rad2deg(heading_diff))) if len(heading_diff) > 0 else 0.0
+
 def _generate_bottom_to_top(
     terrain,
     rng: np.random.Generator,
     lanes: int,
     lane_width: float,
-    shoulder: float
-) -> List[_vec2]:
-    """
-    Smooth bottom→top via randomly jittered control points + cubic spline,
-    with iterative curvature‐based amplitude control to guarantee min‐radius.
-    """
+    shoulder: float,
+    max_spline_turn_deg=45.0,
+    check_meters=300.0,
+):
     size = terrain.size
+    x = rng.uniform(0.15 * size, 0.85 * size)
+    y = 0.0
 
-    # 1) compute your lane‐based min turn radius
-    base_min = MIN_RADIUS_BY_LANES.get(lanes, 65.0)
-    min_radius = base_min * (lane_width / MIN_RADIUS_SCALE_WITH_LANEWIDTH)
+    step = 100.0
 
-    # 2) choose how many control points (excluding start/end)
-    #    fewer lanes → more points → more wiggles
-    mid_min, mid_max = MIN_CTRL_POINTS, MAX_CTRL_POINTS
-    num_mid = int(np.interp(lanes,
-                            [LANE_COUNT_MIN, LANE_COUNT_MAX],
-                            [mid_max, mid_min]))
-    total_pts = num_mid + 2  # include start/end
+    # Lane-dependent max angle: curvier for fewer lanes, straighter for more
+    LANES_MIN = 1
+    LANES_MAX = 6
+    ANGLE_MIN_DEG = 20.0   # for 6 lanes
+    ANGLE_MAX_DEG = 80.0   # for 1 lane
 
-    # 3) initial jitter amplitude (as fraction of map width)
-    jitter_frac = (LANE_COUNT_MAX + 1 - lanes) / LANE_COUNT_MAX * 0.3
+    lanes_clamped = np.clip(lanes, LANES_MIN, LANES_MAX)
+    start_angle_deg = np.interp(lanes_clamped, [LANES_MIN, LANES_MAX], [ANGLE_MAX_DEG, ANGLE_MIN_DEG])
+    max_angle = np.deg2rad(start_angle_deg)
+    print(f"[debug] Using max angle {start_angle_deg:.1f}° for {lanes} lanes")
 
-    # we’ll iteratively reduce jitter_frac until curvature is ok
-    for attempt in range(5):
-        # 4) build control z positions equally spaced, then jitter slightly
-        z_ctrl = np.linspace(0.0, size, total_pts)
-        span = size / total_pts
-        z_ctrl[1:-1] += rng.uniform(-span*0.5, span*0.5, size=num_mid)
-        z_ctrl = np.clip(np.sort(z_ctrl), 0, size)
+    min_angle = 0.0
+    angle_step = np.deg2rad(10)
+    min_map_x = 0.05 * size
+    max_map_x = 0.95 * size
 
-        # 5) build control x positions: start/end random, mids random + jitter
-        x_ctrl = rng.uniform(SIDE_MARGIN*size, (1-SIDE_MARGIN)*size, size=total_pts)
-        # apply extra jitter around straight‐line interpolation
-        for i in range(1, total_pts-1):
-            straight_x = x_ctrl[0] + (x_ctrl[-1]-x_ctrl[0]) * (z_ctrl[i]/size)
-            dev = jitter_frac * size
-            x_ctrl[i] = np.clip(straight_x + rng.uniform(-dev, dev),
-                                 SIDE_MARGIN*size, (1-SIDE_MARGIN)*size)
+    points = [np.array([x, y])]
+    print(f"[debug] Start point: ({x:.2f}, {y:.2f})")
 
-        # 6) build a natural cubic spline x(z)
-        csx = CubicSpline(z_ctrl, x_ctrl, bc_type="natural")
+    while y < size:
+        found_point = False
+        try_angles = np.arange(max_angle, min_angle - angle_step, -angle_step)
+        for angle_offset in try_angles:
+            if angle_offset > 0:
+                angle = np.pi / 2 + rng.uniform(-angle_offset, angle_offset)
+            else:
+                angle = np.pi / 2  # perfectly straight up
 
-        # 7) sample densely
-        n = max(2, int(size / RESAMPLE_STEP))
-        z_s = np.linspace(0.0, size, n)
-        x_s = csx(z_s)
+            # Always accept 0-degree (vertical) as a fail-safe, skip all checks
+            if angle_offset <= 0.0 or np.isclose(angle_offset, 0.0):
+                dx = 0
+                dy = step
+                x_new = np.clip(x, min_map_x, max_map_x)
+                y_new = y + dy
+                if y_new >= size:
+                    y_new = size
+                points.append(np.array([x_new, y_new]))
+                print(f"[debug] Forcibly added straight control point: ({x_new:.2f}, {y_new:.2f})")
+                x, y = x_new, y_new
+                found_point = True
+                break
 
-        # 8) smooth optional: larger roads get heavier smoothing
-        sigma = np.interp(lanes,
-                          [LANE_COUNT_MIN, LANE_COUNT_MAX],
-                          [PATH_SMOOTH_SIGMA_MAX*0.5, PATH_SMOOTH_SIGMA_MIN])
-        if sigma > 1.0:
-            x_s = gaussian_filter1d(x_s, sigma)
+            # Usual candidate checks
+            dx = step * np.cos(angle)
+            dy = step * np.sin(angle)
+            x_new = np.clip(x + dx, min_map_x, max_map_x)
+            y_new = y + dy
+            if y_new >= size:
+                y_new = size
+                x_new = np.clip(x_new + rng.uniform(-30, 30), min_map_x, max_map_x)
 
-        # 9) curvature check: κ ≈ |x''|/(1 + x'²)^(3/2) since z is linear
-        dx = np.gradient(x_s, z_s)
-        ddx = np.gradient(dx, z_s)
-        kappa = np.abs(ddx) / (1 + dx**2)**1.5
-        found_min_rad = 1.0 / (np.max(kappa) + 1e-9)
+            # Try this point
+            test_points = points + [np.array([x_new, y_new])]
+            xs = [pt[0] for pt in test_points]
+            ys = [pt[1] for pt in test_points]
+            try:
+                cs = CubicSpline(ys, xs, bc_type="natural")
+                y_test = np.linspace(max(0, ys[-1] - check_meters), ys[-1], 10)
+                x_test = cs(y_test)
+                if np.any(x_test < 0) or np.any(x_test > size):
+                    continue  # out of bounds
 
-        if found_min_rad >= min_radius:
-            # success!
-            return [np.array([float(xi), float(zi)]) for xi, zi in zip(x_s, z_s)]
+                heading_change = _max_tail_heading_change(x_test, y_test, check_meters)
+                if heading_change > max_spline_turn_deg:
+                    print(f"[debug] REJECT angle {np.rad2deg(angle_offset):.1f}°: tail heading change {heading_change:.1f}°")
+                    continue  # too sharp
+            except Exception:
+                continue  # Spline fitting failed
 
-        # else clamp jitter and retry more gently
-        jitter_frac *= 0.6
+            # Accept point
+            points.append(np.array([x_new, y_new]))
+            print(f"[debug] Control point: ({x_new:.2f}, {y_new:.2f}), angle={np.rad2deg(angle_offset):.1f}°")
+            x, y = x_new, y_new
+            found_point = True
+            break
 
-    # if all retries fail, just return the last even‐if‐tight path
-    return [np.array([float(xi), float(zi)]) for xi, zi in zip(x_s, z_s)]
+        if not found_point:
+            print("[debug] Could not find a valid control point, ending early")
+            break
+
+    # Final spline fit
+    xs = [pt[0] for pt in points]
+    ys = [pt[1] for pt in points]
+    cs = CubicSpline(ys, xs, bc_type="natural")
+    n_samples = max(2, int(size // 2))
+    y_samples = np.linspace(0, ys[-1], n_samples)
+    x_samples = cs(y_samples)
+
+    sigma = np.interp(lanes, [1, 4], [2.0, 0.5])
+    if sigma > 1.0:
+        x_samples = gaussian_filter1d(x_samples, sigma)
+
+    print(f"[debug] Sampled {len(x_samples)} spline points.")
+    for i in range(0, len(x_samples), max(1, len(x_samples)//10)):
+        print(f"[debug] Spline pt: ({x_samples[i]:.2f}, {y_samples[i]:.2f})")
+
+    heading_change = _max_tail_heading_change(x_samples, y_samples, check_meters)
+    print(f"[debug] FINAL max heading change (tail): {heading_change:.1f}°")
+    path = [np.array([float(xi), float(yi)]) for xi, yi in zip(x_samples, y_samples)]
+    return path
 
 
 def _compute_speed_limits(path: List[_vec2], terrain, road_friction: float) -> List[dict]:
@@ -554,7 +608,7 @@ def get_safe_start_position_and_rot(terrain, road_points: List[Tuple[float, floa
     car_rot = quat_from_yaw(yaw)
     return car_pos, car_rot
 
-def preview_plan(terrain, road_points):
+def preview_plan(terrain, road_points, lanes=1):
     """
     Show a top-down view of the road centreline over the terrain heightmap.
     """
@@ -573,7 +627,11 @@ def preview_plan(terrain, road_points):
 
     xs = [p[0] for p in road_points]
     zs = [p[1] for p in road_points]
-    plt.plot(xs, zs, color='red', linewidth=2, label='Road centreline')
+
+    min_width = 2
+    max_width = 8
+    width = min_width + (max_width - min_width) * ((lanes - 1) / (LANE_COUNT_MAX - 1))
+    plt.plot(xs, zs, color='red', linewidth=width, label=f'{lanes} Lane Road')
 
     plt.xlabel('X (m)')
     plt.ylabel('Z (m)')
@@ -604,5 +662,5 @@ if __name__ == "__main__":
     apply_plan(terrain, pts, params, rng=rng)
 
     print(f"Generated road with {len(pts)} points on {terrain.res}×{terrain.res} terrain")
-    preview_plan(terrain, pts)
+    preview_plan(terrain, pts, params['lanes'])
 
