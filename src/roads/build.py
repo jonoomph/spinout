@@ -13,6 +13,25 @@ from scipy.interpolate import RectBivariateSpline
 from . import plan as cfg
 
 _vec2 = np.ndarray
+
+# Simple line font for digits and a few letters used on speed signs
+_CHAR_LINES = {
+    "0": [((0, 0), (1, 0)), ((1, 0), (1, 2)), ((1, 2), (0, 2)), ((0, 2), (0, 0))],
+    "1": [((0.5, 0), (0.5, 2))],
+    "2": [((0, 2), (1, 2)), ((1, 2), (1, 1)), ((1, 1), (0, 1)), ((0, 1), (0, 0)), ((0, 0), (1, 0))],
+    "3": [((0, 2), (1, 2)), ((1, 2), (1, 0)), ((0, 1), (1, 1)), ((0, 0), (1, 0))],
+    "4": [((0, 2), (0, 1)), ((0, 1), (1, 1)), ((1, 2), (1, 0))],
+    "5": [((1, 2), (0, 2)), ((0, 2), (0, 1)), ((0, 1), (1, 1)), ((1, 1), (1, 0)), ((0, 0), (1, 0))],
+    "6": [((1, 2), (0, 2)), ((0, 2), (0, 0)), ((0, 0), (1, 0)), ((1, 0), (1, 1)), ((1, 1), (0, 1))],
+    "7": [((0, 2), (1, 2)), ((1, 2), (1, 0))],
+    "8": [((0, 0), (1, 0)), ((1, 0), (1, 2)), ((1, 2), (0, 2)), ((0, 2), (0, 0)), ((0, 1), (1, 1))],
+    "9": [((1, 0), (1, 2)), ((1, 2), (0, 2)), ((0, 2), (0, 1)), ((0, 1), (1, 1)), ((1, 1), (1, 0))],
+    "M": [((0, 0), (0, 2)), ((0, 2), (0.5, 1)), ((0.5, 1), (1, 2)), ((1, 2), (1, 0))],
+    "P": [((0, 0), (0, 2)), ((0, 2), (1, 2)), ((1, 2), (1, 1)), ((1, 1), (0, 1))],
+    "H": [((0, 0), (0, 2)), ((1, 0), (1, 2)), ((0, 1), (1, 1))],
+}
+
+_CHAR_SPACING = 1.2
 def _tangent(path: List[_vec2], i: int) -> _vec2:
     if i == 0:
         v = path[1] - path[0]
@@ -152,6 +171,8 @@ def build_road_vertices(
     ditch_width: float | None = None,
     road_color=cfg.ROAD_COL,
     skirt_color=cfg.SKIRT_COL,
+    drive_line: List[Tuple[float, float]] | None = None,
+    speed_limits: List[dict] | None = None,
     **_: dict,
 ) -> np.ndarray:
     if ditch_width is None:
@@ -203,6 +224,21 @@ def build_road_vertices(
     def emit_quad(a, b, c, d, col):
         verts.extend(a + col); verts.extend(b + col); verts.extend(c + col)
         verts.extend(c + col); verts.extend(b + col); verts.extend(d + col)
+
+    def emit_text_billboard(text, center, right, up, scale, color):
+        text = text.upper()
+        width = len(text) * _CHAR_SPACING
+        start = -0.5 * width
+        for i, ch in enumerate(text):
+            segs = _CHAR_LINES.get(ch)
+            if not segs:
+                continue
+            x_off = start + i * _CHAR_SPACING
+            for (p0, p1) in segs:
+                w0 = center + right * ((p0[0] + x_off) * scale) + up * (p0[1] * scale)
+                w1 = center + right * ((p1[0] + x_off) * scale) + up * (p1[1] * scale)
+                verts.extend(w0.tolist() + color)
+                verts.extend(w1.tolist() + color)
 
     path_np = [np.array(p, float) for p in path]
     period = cfg.DASH_LENGTH + cfg.GAP_LENGTH
@@ -293,6 +329,58 @@ def build_road_vertices(
                     vert_r1 = [xr1, yr1, zr1]
 
                     emit_quad(vert_l0, vert_r0, vert_l1, vert_r1, col)
+    # Driveline rendering
+    if drive_line:
+        dl_pts = [np.array([x, base_height(x, z) + cfg.DRIVE_LINE_HEIGHT, z]) for x, z in drive_line]
+        green = [0.0, 1.0, 0.0, 1.0]
+        half = cfg.DRIVE_LINE_WIDTH * 0.5
+
+        def emit_dl_quad(v0, v1, v2, v3):
+            verts.extend(v0 + green); verts.extend(v1 + green); verts.extend(v3 + green)
+            verts.extend(v0 + green); verts.extend(v3 + green); verts.extend(v2 + green)
+
+        for a, b in zip(dl_pts[:-1], dl_pts[1:]):
+            seg = b - a
+            dir2 = np.array([seg[0], seg[2]], dtype=float)
+            L = float(np.linalg.norm(dir2))
+            if L <= 1e-6:
+                continue
+            dir2 /= L
+            nrm2 = np.array([-dir2[1], dir2[0]], dtype=float)
+            offset = np.array([nrm2[0] * half, 0.0, nrm2[1] * half])
+            v0 = (a + offset).tolist()
+            v1 = (a - offset).tolist()
+            v2 = (b + offset).tolist()
+            v3 = (b - offset).tolist()
+            emit_dl_quad(v0, v1, v2, v3)
+
+    # Speed limit signs
+    if speed_limits:
+        white = [1.0, 1.0, 1.0, 1.0]
+        for seg in speed_limits:
+            idx = seg.get("sign_idx")
+            if idx is None or idx < 0 or idx >= len(path_np):
+                continue
+            c = path_np[idx]
+            if idx < len(path_np) - 1:
+                tvec = path_np[idx + 1] - path_np[idx]
+            else:
+                tvec = path_np[idx] - path_np[idx - 1]
+            L = float(np.linalg.norm(tvec))
+            if L <= 1e-6:
+                continue
+            dir2 = tvec / L
+            # Offset signs to the right-hand shoulder and orient text correctly
+            right2 = np.array([dir2[1], -dir2[0]], dtype=float)
+            right = np.array([right2[0], 0.0, right2[1]])
+            up = np.array([0.0, 1.0, 0.0])
+            sign_off = half_plus_sh + 2.0
+            sx = c[0] + right2[0] * sign_off
+            sz = c[1] + right2[1] * sign_off
+            sy = base_height(sx, sz) + 2.0
+            center = np.array([sx, sy, sz])
+            # Only show the numeric speed – remove MPH suffix
+            emit_text_billboard(f"{seg['speed_mph']}", center, right, up, 0.5, white)
 
     return np.array(verts, dtype="f4")
 

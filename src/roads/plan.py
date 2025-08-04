@@ -123,12 +123,25 @@ LINE_WIDTH = 0.15  # m
 DASH_LENGTH = 3.0  # m
 GAP_LENGTH = 9.0   # m
 ROAD_EPS = 0.01    # small offset to prevent z-fighting and ensure mesh above terrain
+DRIVE_LINE_WIDTH = 0.35  # m width of green driveline guide
+DRIVE_LINE_HEIGHT = 0.05  # m above road to avoid z-fighting for driveline
+DRIVE_LINE_STEP = 1.0  # m spacing of driveline samples for rendering
 
 # Colors
 ROAD_COL = [0.55, 0.55, 0.55, 1.0]
 SKIRT_COL = [34 / 255, 139 / 255, 34 / 255, 1.0]
 YELLOW_COL = [1.0, 1.0, 0.0, 1.0]
 WHITE_COL = [1.0, 1.0, 1.0, 1.0]
+
+# Speed limit choices in miles per hour for US style roads
+# Use 5 mph increments from 25 up to 80
+SPEED_LIMIT_CHOICES = list(range(25, 85, 5))
+
+# Minimum distance the driveline stays in a lane before considering a change (m)
+LANE_CHANGE_MIN_DIST = 100.0
+
+# Sigmoid steepness for lane changes
+LANE_CHANGE_SIGMOID_K = 1.5
 
 # ---------------------------------------------------------------------------
 # Utilities
@@ -245,6 +258,178 @@ def _generate_bottom_to_top(
     return [np.array([float(xi), float(zi)]) for xi, zi in zip(x_s, z_s)]
 
 
+def _compute_speed_limits(path: List[_vec2], terrain, road_friction: float) -> List[dict]:
+    """Compute speed limits every 100 m based on curvature and slope."""
+    path_arr = np.array(path)
+    xs = path_arr[:, 0]
+    zs = path_arr[:, 1]
+    dx = np.diff(xs)
+    dz = np.diff(zs)
+    ds = np.sqrt(dx ** 2 + dz ** 2)
+    s = np.concatenate(([0.0], np.cumsum(ds)))
+    heights = np.array([terrain.get_height(x, z) for x, z in path_arr])
+
+    segments = []
+    total_len = s[-1]
+    g = 9.81
+    prev_speed = None
+    for start in np.arange(0.0, total_len, 100.0):
+        end = min(start + 100.0, total_len)
+        idx0 = int(np.searchsorted(s, start, side="left"))
+        idx1 = int(np.searchsorted(s, end, side="left"))
+        idx1 = min(max(idx1, idx0 + 2), len(path_arr) - 1)
+
+        dx_seg = np.diff(xs[idx0:idx1 + 1])
+        dz_seg = np.diff(zs[idx0:idx1 + 1])
+        ddx = np.diff(dx_seg)
+        ddz = np.diff(dz_seg)
+        if len(ddx) > 0:
+            kappa = (
+                np.abs(dx_seg[:-1] * ddz - dz_seg[:-1] * ddx)
+                / ((dx_seg[:-1] ** 2 + dz_seg[:-1] ** 2) ** 1.5 + 1e-9)
+            )
+            max_kappa = float(np.max(kappa)) if kappa.size else 0.0
+        else:
+            max_kappa = 0.0
+        min_radius = math.inf if max_kappa <= 1e-6 else 1.0 / max_kappa
+
+        seg_heights = heights[idx0:idx1 + 1]
+        seg_ds = ds[idx0:idx1]
+        grades = np.abs(np.diff(seg_heights) / (seg_ds + 1e-6))
+        max_grade = float(np.max(grades)) if grades.size else 0.0
+
+        v_mps = math.sqrt(max(road_friction, 0.1) * g * min_radius) if math.isfinite(min_radius) else 100.0
+        v_mph = v_mps * 2.23694
+        if max_grade > 0.06:
+            v_mph *= 0.7
+        elif max_grade > 0.04:
+            v_mph *= 0.85
+
+        speed = SPEED_LIMIT_CHOICES[0]
+        for lim in SPEED_LIMIT_CHOICES:
+            if v_mph >= lim:
+                speed = lim
+        if prev_speed is not None and speed > prev_speed + 15:
+            speed = min(speed, prev_speed + 15)
+        prev_speed = speed
+
+        # place sign slightly ahead of the segment start so the first is visible
+        # to the car when spawning at the bottom of the road
+        sign_idx = min(idx0 + 1, len(path_arr) - 1)
+        segments.append({
+            "start_idx": idx0,
+            "end_idx": idx1,
+            "start_s": float(start),
+            "end_s": float(end),
+            "speed_mph": int(speed),
+            "sign_idx": sign_idx,
+        })
+
+    return segments
+
+
+def _lane_center_offset(lane: int, lanes: int, lane_width: float) -> float:
+    """Return offset from center for a lane index (0 = leftmost).
+
+    Positive offsets point to the left of travel; negative offsets are to the
+    right. This matches the left-handed normal used when sweeping road geometry
+    so that the rightmost lane ends up on the correct side of the road."""
+    half = lane_width * lanes / 2.0
+    # Leftmost lane has the largest positive offset; rightmost is most negative
+    return half - lane_width * 0.5 - lane * lane_width
+
+
+def _speed_limit_at(dist: float, segments: List[dict]) -> float:
+    for seg in segments:
+        if seg["start_s"] <= dist < seg["end_s"]:
+            return seg["speed_mph"]
+    return segments[-1]["speed_mph"] if segments else SPEED_LIMIT_CHOICES[0]
+
+
+def _smoothstep(x: float) -> float:
+    """Cubic easing with zero slope at both ends."""
+    x = min(max(x, 0.0), 1.0)
+    return x * x * (3.0 - 2.0 * x)
+
+
+def _generate_drive_line(
+    path: List[_vec2],
+    segments: List[dict],
+    lanes: int,
+    lane_width: float,
+    rng: np.random.Generator,
+) -> List[Tuple[float, float]]:
+    path_arr = np.array(path)
+    xs = path_arr[:, 0]
+    zs = path_arr[:, 1]
+    dx = np.diff(xs)
+    dz = np.diff(zs)
+    ds = np.sqrt(dx ** 2 + dz ** 2)
+    s = np.concatenate(([0.0], np.cumsum(ds)))
+
+    x_spline = CubicSpline(s, xs)
+    z_spline = CubicSpline(s, zs)
+    dx_ds = x_spline.derivative()
+    dz_ds = z_spline.derivative()
+
+    total = s[-1]
+    step = DRIVE_LINE_STEP
+    s_vals = np.arange(0.0, total + step, step)
+
+    start_lane = int(rng.integers(lanes // 2, lanes)) if lanes > 1 else 0
+    current_lane = start_lane
+    offset = _lane_center_offset(current_lane, lanes, lane_width)
+    next_change = LANE_CHANGE_MIN_DIST
+    change = None
+    drive_line: List[Tuple[float, float]] = []
+
+    for s_i in s_vals:
+        if change:
+            frac = (s_i - change["start_s"]) / change["dist"]
+            t = _smoothstep(frac)
+            offset = change["start_off"] + (change["target_off"] - change["start_off"]) * t
+            if frac >= 1.0:
+                current_lane = change["target_lane"]
+                change = None
+                next_change = s_i + LANE_CHANGE_MIN_DIST
+        else:
+            offset = _lane_center_offset(current_lane, lanes, lane_width)
+            if s_i >= next_change and lanes >= 3:
+                min_lane = lanes // 2
+                adj = []
+                if current_lane - 1 >= min_lane:
+                    adj.append(current_lane - 1)
+                if current_lane + 1 < lanes:
+                    adj.append(current_lane + 1)
+                choices = [current_lane] + adj
+                new_lane = int(rng.choice(choices))
+                next_change = s_i + LANE_CHANGE_MIN_DIST
+                if new_lane != current_lane:
+                    speed = _speed_limit_at(s_i, segments)
+                    dist_change = float(np.interp(speed, [25, 80], [40.0, 120.0]))
+                    change = {
+                        "start_s": s_i,
+                        "dist": dist_change,
+                        "start_off": offset,
+                        "target_off": _lane_center_offset(new_lane, lanes, lane_width),
+                        "target_lane": new_lane,
+                    }
+
+        x = float(x_spline(s_i))
+        z = float(z_spline(s_i))
+        tdir = np.array([dx_ds(s_i), dz_ds(s_i)], dtype=float)
+        n = np.linalg.norm(tdir)
+        if n > 1e-6:
+            tdir /= n
+        else:
+            tdir = np.array([0.0, 1.0])
+        nrm = np.array([-tdir[1], tdir[0]])
+        pos = np.array([x, z]) + nrm * offset
+        drive_line.append((float(pos[0]), float(pos[1])))
+
+    return drive_line
+
+
 def generate_plan(
     terrain,
     rng: np.random.Generator | None = None,
@@ -279,6 +464,10 @@ def generate_plan(
         bump_amp *= 0.25  # holey, few bumps
 
     path = _generate_bottom_to_top(terrain, rng, lanes, lane_width, shoulder)
+
+    # Determine speed limits and drive line before returning
+    speed_limits = _compute_speed_limits(path, terrain, road_friction)
+    drive_line = _generate_drive_line(path, speed_limits, lanes, lane_width, rng)
 
     path_arr = np.array(path)
     ds = np.linalg.norm(np.diff(path_arr, axis=0), axis=1)
@@ -324,6 +513,8 @@ def generate_plan(
         "road_friction": road_friction,
         "road_color": road_color,
         "skirt_color": skirt_color,
+        "speed_limits": speed_limits,
+        "drive_line": drive_line,
     }
     return [(float(p[0]), float(p[1])) for p in path], params
 
