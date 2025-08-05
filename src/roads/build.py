@@ -31,7 +31,7 @@ _CHAR_LINES = {
     "H": [((0, 0), (0, 2)), ((1, 0), (1, 2)), ((0, 1), (1, 1))],
 }
 
-_CHAR_SPACING = 1.2
+_CHAR_SPACING = 1.1
 def _tangent(path: List[_vec2], i: int) -> _vec2:
     if i == 0:
         v = path[1] - path[0]
@@ -225,29 +225,6 @@ def build_road_vertices(
         verts.extend(a + col); verts.extend(b + col); verts.extend(c + col)
         verts.extend(c + col); verts.extend(b + col); verts.extend(d + col)
 
-    def emit_text_billboard(text, center, right, up, scale, color):
-        text = text.upper()
-        width = len(text) * _CHAR_SPACING
-        start = -0.5 * width
-        thickness = 0.05 * scale
-        for i, ch in enumerate(text):
-            segs = _CHAR_LINES.get(ch)
-            if not segs:
-                continue
-            x_off = start + i * _CHAR_SPACING
-            for (p0, p1) in segs:
-                w0 = center + right * ((p0[0] + x_off) * scale) + up * (p0[1] * scale)
-                w1 = center + right * ((p1[0] + x_off) * scale) + up * (p1[1] * scale)
-                dir_vec = w1 - w0
-                side = np.cross(up, dir_vec)
-                side /= np.linalg.norm(side) + 1e-8
-                half = side * (thickness * 0.5)
-                a = (w0 - half).tolist()
-                b = (w0 + half).tolist()
-                c = (w1 - half).tolist()
-                d = (w1 + half).tolist()
-                emit_quad(a, b, c, d, color)
-
     path_np = [np.array(p, float) for p in path]
     period = cfg.DASH_LENGTH + cfg.GAP_LENGTH
     line_half = cfg.LINE_WIDTH / 2.0
@@ -362,33 +339,153 @@ def build_road_vertices(
             v3 = (b - offset).tolist()
             emit_dl_quad(v0, v1, v2, v3)
 
-    # Speed limit signs
-    if speed_limits:
-        white = [1.0, 1.0, 1.0, 1.0]
-        for seg in speed_limits:
-            idx = seg.get("sign_idx")
-            if idx is None or idx < 0 or idx >= len(path_np):
+    return np.array(verts, dtype="f4")
+
+
+def build_speed_sign_vertices(
+    terrain,
+    path: List[Tuple[float, float]],
+    lane_width: float,
+    lanes: int,
+    shoulder: float,
+    speed_limits: List[dict] | None = None,
+) -> np.ndarray:
+    """Build simple billboard geometry for speed limit signs.
+
+    The signs are constructed from line segments forming digits using the
+    lightweight line font defined at module level. They are returned as a
+    separate vertex array so they can be rendered independently of the road
+    mesh (allowing them to stay visible even in wireframe mode).
+    """
+    if not speed_limits:
+        return np.zeros((0, 7), dtype="f4")
+
+    path_np = [np.array(p, float) for p in path]
+    half_road = 0.5 * lane_width * lanes
+    half_plus_sh = half_road + shoulder
+
+    verts: list[float] = []
+
+    def emit_tri(a, b, c, col):
+        verts.extend(a + col)
+        verts.extend(b + col)
+        verts.extend(c + col)
+
+    def emit_quad(a, b, c, d, col):
+        emit_tri(a, b, c, col)
+        emit_tri(c, b, d, col)
+
+    def emit_rect(center, right, up, width, height, color):
+        hw = width * 0.5
+        hh = height * 0.5
+        a = (center - right * hw - up * hh).tolist()
+        b = (center + right * hw - up * hh).tolist()
+        c = (center - right * hw + up * hh).tolist()
+        d = (center + right * hw + up * hh).tolist()
+        emit_quad(a, b, c, d, color)
+
+    def emit_rounded_rect(center, right, up, width, height, radius, color):
+        radius = max(0.0, min(radius, min(width, height) * 0.5))
+        arc_steps = 4
+        w = width
+        h = height
+        pts = []
+        corners = [
+            (w/2 - radius, h/2 - radius, 0, np.pi/2),          # top-right
+            (-w/2 + radius, h/2 - radius, np.pi/2, np.pi),     # top-left
+            (-w/2 + radius, -h/2 + radius, np.pi, 3*np.pi/2),  # bottom-left
+            (w/2 - radius, -h/2 + radius, 3*np.pi/2, 2*np.pi), # bottom-right
+        ]
+        for cx, cy, a0, a1 in corners:
+            for t in np.linspace(a0, a1, arc_steps, endpoint=False):
+                pts.append((cx + radius * np.cos(t), cy + radius * np.sin(t)))
+        pts.append((w/2 - radius, h/2 - radius))  # close shape
+        center_pt = center
+        for i in range(1, len(pts) - 1):
+            p0 = center_pt + right * pts[0][0] + up * pts[0][1]
+            p1 = center_pt + right * pts[i][0] + up * pts[i][1]
+            p2 = center_pt + right * pts[i + 1][0] + up * pts[i + 1][1]
+            emit_tri(p0.tolist(), p1.tolist(), p2.tolist(), color)
+
+    def emit_text_billboard(text, center, right, up, scale, color, spacing=_CHAR_SPACING):
+        text = text.upper()
+        width = len(text) * spacing
+        start = -0.5 * width
+        thickness = 0.05 * scale
+        normal = np.cross(right, up)
+        for i, ch in enumerate(text):
+            segs = _CHAR_LINES.get(ch)
+            if not segs:
                 continue
-            c = path_np[idx]
-            if idx < len(path_np) - 1:
-                tvec = path_np[idx + 1] - path_np[idx]
-            else:
-                tvec = path_np[idx] - path_np[idx - 1]
-            L = float(np.linalg.norm(tvec))
-            if L <= 1e-6:
-                continue
-            dir2 = tvec / L
-            # Offset signs to the right-hand shoulder and orient text correctly
-            right2 = np.array([dir2[1], -dir2[0]], dtype=float)
-            right = np.array([right2[0], 0.0, right2[1]])
-            up = np.array([0.0, 1.0, 0.0])
-            sign_off = half_plus_sh + 2.0
-            sx = c[0] + right2[0] * sign_off
-            sz = c[1] + right2[1] * sign_off
-            sy = base_height(sx, sz) + 2.0
-            center = np.array([sx, sy, sz])
-            # Only show the numeric speed – remove MPH suffix
-            emit_text_billboard(f"{seg['speed_mph']}", center, right, up, 0.5, white)
+            x_off = start + i * spacing
+            for (p0, p1) in segs:
+                w0 = center + right * ((p0[0] + x_off) * scale) + up * (p0[1] * scale)
+                w1 = center + right * ((p1[0] + x_off) * scale) + up * (p1[1] * scale)
+                dir_vec = w1 - w0
+                side = np.cross(dir_vec, normal)
+                side /= np.linalg.norm(side) + 1e-8
+                half = side * (thickness * 0.5)
+                a = (w0 - half).tolist()
+                b = (w0 + half).tolist()
+                c = (w1 - half).tolist()
+                d = (w1 + half).tolist()
+                emit_quad(a, b, c, d, color)
+
+    white = [1.0, 1.0, 1.0, 1.0]
+    black = [0.0, 0.0, 0.0, 1.0]
+    gray = [0.6, 0.6, 0.6, 1.0]
+    for seg in speed_limits:
+        idx = seg.get("sign_idx")
+        if idx is None or idx < 0 or idx >= len(path_np):
+            continue
+        c = path_np[idx]
+        if idx < len(path_np) - 1:
+            tvec = path_np[idx + 1] - path_np[idx]
+        else:
+            tvec = path_np[idx] - path_np[idx - 1]
+        L = float(np.linalg.norm(tvec))
+        if L <= 1e-6:
+            continue
+        dir2 = tvec / L
+        right2 = np.array([dir2[1], -dir2[0]], dtype=float)
+        right = np.array([right2[0], 0.0, right2[1]])
+        up = np.array([0.0, 1.0, 0.0])
+        normal = np.cross(right, up)
+        sign_off = half_plus_sh + 2.0
+        sx = c[0] + right2[0] * sign_off
+        sz = c[1] + right2[1] * sign_off
+        ground_y = terrain.get_height(sx, sz)
+        sy = ground_y + 2.0
+        center = np.array([sx, sy, sz])
+
+        # Layout parameters
+        scale = 0.5
+        spacing = 1.1
+        pad = 0.2
+        border = 0.05
+        radius = 0.1
+        text = f"{seg['speed_mph']}"
+        text_width = len(text) * spacing * scale
+        text_height = 2.0 * scale
+        inner_w = text_width + 2 * pad
+        inner_h = text_height + 2 * pad
+        outer_w = inner_w + 2 * border
+        outer_h = inner_h + 2 * border
+        inner_r = radius
+        outer_r = radius + border
+
+        # Post behind the sign
+        post_width = 0.1
+        post_height = (sy - inner_h * 0.5) - ground_y
+        post_center = np.array([sx, ground_y + post_height * 0.5, sz]) - normal * 0.02
+        emit_rect(post_center, right, up, post_width, post_height, gray)
+
+        # Border and background
+        emit_rounded_rect(center, right, up, outer_w, outer_h, outer_r, black)
+        emit_rounded_rect(center + normal * 0.001, right, up, inner_w, inner_h, inner_r, white)
+
+        # Digits slightly in front
+        emit_text_billboard(text, center + normal * 0.002, right, up, scale, black, spacing=spacing)
 
     return np.array(verts, dtype="f4")
 

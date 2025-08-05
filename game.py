@@ -7,7 +7,7 @@ import json
 
 from src.physics import Terrain, Car
 from src.roads.plan import generate_plan, get_safe_start_position_and_rot
-from src.roads.build import apply_plan, build_road_vertices
+from src.roads.build import apply_plan, build_road_vertices, build_speed_sign_vertices
 from src.controls import get_controls
 from src.hud import render_hud
 from src.render import RenderContext
@@ -100,6 +100,20 @@ road_vbo_lit = render_ctx.ctx.buffer(road_vertices_lit.tobytes())
 road_vao_lit = render_ctx.ctx.vertex_array(
     render_ctx.prog_lit, road_vbo_lit, 'in_vert', 'in_normal', 'in_color'
 )
+
+# Build speed limit sign geometry separately so it can be drawn filled even in wireframe mode
+sign_vertices = build_speed_sign_vertices(
+    terrain,
+    road_points,
+    lane_width=road_plan["lane_width"],
+    lanes=road_plan["lanes"],
+    shoulder=road_plan["shoulder"],
+    speed_limits=road_plan.get("speed_limits"),
+)
+sign_vao = None
+if sign_vertices.size > 0:
+    sign_vbo = render_ctx.ctx.buffer(sign_vertices.tobytes())
+    sign_vao = render_ctx.ctx.vertex_array(render_ctx.prog, sign_vbo, 'in_vert', 'in_color')
 terrain_basic, terrain_lit = build_terrain_triangles(terrain)
 terrain_vbo = render_ctx.ctx.buffer(terrain_basic.tobytes())
 terrain_vao = render_ctx.ctx.vertex_array(render_ctx.prog, terrain_vbo, 'in_vert', 'in_color')
@@ -181,6 +195,8 @@ while running:
     r_vao = road_vao_lit if render_mode == 2 else road_vao
     render_ctx.render_terrain(t_vao, mvp)
     render_ctx.render_terrain(r_vao, mvp)
+    if sign_vao:
+        render_ctx.render_signs(sign_vao, mvp)
     render_ctx.render_car(collect_car_vertices(car, car_up, car_dir, dt, wheel_spin_accum), mvp)
 
     speed_mph = np.linalg.norm(car.body.vel) * 2.23694

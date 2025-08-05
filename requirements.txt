@@ -5,3 +5,4 @@ moderngl
 pygame>=2.5.2
 pytest
 matplotlib
+pillow

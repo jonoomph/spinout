@@ -70,6 +70,19 @@ class RenderContext:
             prog['light_dir'].value = tuple(self.light_dir)
         terrain_vao.render(moderngl.TRIANGLES)
 
+    def render_signs(self, vao, mvp):
+        """Render billboards such as speed limit signs.
+
+        Signs should remain filled regardless of the global wireframe mode, so
+        this temporarily disables wireframe rendering while drawing the
+        geometry."""
+        was_wireframe = self.ctx.wireframe
+        self.ctx.wireframe = False
+        prog = vao.program
+        prog['mvp'].write(mvp.T.tobytes())
+        vao.render(moderngl.TRIANGLES)
+        self.ctx.wireframe = was_wireframe
+
     def render_car(self, vertices, mvp):
         main_vertices, shock_vertices = vertices
         self.prog['mvp'].write(mvp.T.tobytes())
