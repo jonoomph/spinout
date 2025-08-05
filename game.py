@@ -5,7 +5,7 @@ import time
 import numpy as np
 import json
 
-from src.physics import Terrain, Car, Quaternion
+from src.physics import Terrain, Car
 from src.roads.plan import generate_plan, get_safe_start_position_and_rot
 from src.roads.build import apply_plan, build_road_vertices
 from src.controls import get_controls

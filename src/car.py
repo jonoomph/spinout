@@ -6,17 +6,15 @@ import numpy as np
 def _wheel_points(offset_pos, axle_dir, v1, v2, angle, radius, num):
     cos_a = math.cos(angle)
     sin_a = math.sin(angle)
-    pts = []
-    for i in range(num):
-        t = 2 * math.pi * i / num
-        local = v1 * math.cos(t) + v2 * math.sin(t)
-        rot = (
-            local * cos_a
-            - np.cross(axle_dir, local) * sin_a
-            + axle_dir * np.dot(axle_dir, local) * (1 - cos_a)
-        )
-        pts.append(offset_pos + rot * radius)
-    return pts
+    t = np.linspace(0, 2 * math.pi, num, endpoint=False)
+    local = np.outer(np.cos(t), v1) + np.outer(np.sin(t), v2)
+    rot = (
+        local * cos_a
+        - np.cross(axle_dir, local) * sin_a
+        + np.outer(np.dot(local, axle_dir), axle_dir) * (1 - cos_a)
+    )
+    pts = offset_pos + rot * radius
+    return list(pts)
 
 
 def collect_car_vertices(car, car_up, car_dir, dt, wheel_spin_accum):
