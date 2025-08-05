@@ -82,7 +82,7 @@ apply_plan(terrain, rp, plan, rng=rng)
 # Build meshes and switch to OpenGL mode
 show_loading(0.8, "Building meshes...", screen, loading_font)
 screen = pygame.display.set_mode((WIDTH, HEIGHT), pygame.OPENGL | pygame.DOUBLEBUF)
-pygame.display.set_caption("Simple Car Driving Sim")
+pygame.display.set_caption("Spinout")
 clock = pygame.time.Clock()
 render_ctx = RenderContext(WIDTH, HEIGHT)
 
