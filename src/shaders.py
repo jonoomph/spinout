@@ -68,13 +68,38 @@ void main() {
 }
 '''
 
+vertex_shader_tex = '''
+#version 330
+in vec3 in_vert;
+in vec2 in_tex;
+uniform mat4 mvp;
+out vec2 v_tex;
+void main() {
+    gl_Position = mvp * vec4(in_vert, 1.0);
+    v_tex = in_tex;
+}
+'''
+
+fragment_shader_tex = '''
+#version 330
+in vec2 v_tex;
+uniform sampler2D tex;
+out vec4 fragColor;
+void main() {
+    vec4 color = texture(tex, v_tex);
+    if (color.a < 0.1) discard;
+    fragColor = color;
+}
+'''
+
 def create_shaders(ctx):
     try:
         prog = ctx.program(vertex_shader=vertex_shader, fragment_shader=fragment_shader)
         prog_lit = ctx.program(vertex_shader=vertex_shader_lit, fragment_shader=fragment_shader_lit)
         prog2d = ctx.program(vertex_shader=vertex_shader_2d, fragment_shader=fragment_shader_2d)
+        prog_tex = ctx.program(vertex_shader=vertex_shader_tex, fragment_shader=fragment_shader_tex)
         print("Shaders compiled successfully")
-        return prog, prog2d, prog_lit
+        return prog, prog2d, prog_lit, prog_tex
     except Exception as e:
         print(f"Shader compilation error: {e}")
         raise

@@ -4,10 +4,12 @@ from pygame.locals import *
 import time
 import numpy as np
 import json
+import moderngl
 
 from src.physics import Terrain, Car
 from src.roads.plan import generate_plan, get_safe_start_position_and_rot
 from src.roads.build import apply_plan, build_road_vertices, build_speed_sign_vertices
+from src.signs import generate_speed_limit_sign
 from src.controls import get_controls
 from src.hud import render_hud
 from src.render import RenderContext
@@ -101,8 +103,8 @@ road_vao_lit = render_ctx.ctx.vertex_array(
     render_ctx.prog_lit, road_vbo_lit, 'in_vert', 'in_normal', 'in_color'
 )
 
-# Build speed limit sign geometry separately so it can be drawn filled even in wireframe mode
-sign_vertices = build_speed_sign_vertices(
+# Build speed limit sign geometry and textures so they can be drawn filled even in wireframe mode
+sign_posts, sign_quads = build_speed_sign_vertices(
     terrain,
     road_points,
     lane_width=road_plan["lane_width"],
@@ -110,10 +112,20 @@ sign_vertices = build_speed_sign_vertices(
     shoulder=road_plan["shoulder"],
     speed_limits=road_plan.get("speed_limits"),
 )
-sign_vao = None
-if sign_vertices.size > 0:
-    sign_vbo = render_ctx.ctx.buffer(sign_vertices.tobytes())
-    sign_vao = render_ctx.ctx.vertex_array(render_ctx.prog, sign_vbo, 'in_vert', 'in_color')
+
+sign_post_vao = None
+if sign_posts.size > 0:
+    sign_post_vbo = render_ctx.ctx.buffer(sign_posts.tobytes())
+    sign_post_vao = render_ctx.ctx.vertex_array(render_ctx.prog, sign_post_vbo, 'in_vert', 'in_color')
+
+sign_billboards = []
+for quad in sign_quads:
+    vbo = render_ctx.ctx.buffer(quad["verts"].tobytes())
+    vao = render_ctx.ctx.vertex_array(render_ctx.prog_tex, vbo, 'in_vert', 'in_tex')
+    img = generate_speed_limit_sign(quad["speed"])
+    tex = render_ctx.ctx.texture(img.size, 4, img.tobytes())
+    tex.filter = (moderngl.NEAREST, moderngl.NEAREST)
+    sign_billboards.append((vao, tex))
 terrain_basic, terrain_lit = build_terrain_triangles(terrain)
 terrain_vbo = render_ctx.ctx.buffer(terrain_basic.tobytes())
 terrain_vao = render_ctx.ctx.vertex_array(render_ctx.prog, terrain_vbo, 'in_vert', 'in_color')
@@ -195,8 +207,10 @@ while running:
     r_vao = road_vao_lit if render_mode == 2 else road_vao
     render_ctx.render_terrain(t_vao, mvp)
     render_ctx.render_terrain(r_vao, mvp)
-    if sign_vao:
-        render_ctx.render_signs(sign_vao, mvp)
+    if sign_post_vao:
+        render_ctx.render_signs(sign_post_vao, mvp)
+    for vao, tex in sign_billboards:
+        render_ctx.render_billboard(vao, tex, mvp)
     render_ctx.render_car(collect_car_vertices(car, car_up, car_dir, dt, wheel_spin_accum), mvp)
 
     speed_mph = np.linalg.norm(car.body.vel) * 2.23694

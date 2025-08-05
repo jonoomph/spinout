@@ -12,7 +12,7 @@ class RenderContext:
         self.width = width
         self.height = height
         from src.shaders import create_shaders
-        self.prog, self.prog2d, self.prog_lit = create_shaders(self.ctx)
+        self.prog, self.prog2d, self.prog_lit, self.prog_tex = create_shaders(self.ctx)
         self.ortho = np.eye(4, dtype='f4')  # Identity for NDC
         self.mode = 0  # 0=wireframe,1=solid,2=solid+sun
         self.light_dir = np.array([0.5, 1.0, 0.3], dtype='f4')
@@ -71,15 +71,22 @@ class RenderContext:
         terrain_vao.render(moderngl.TRIANGLES)
 
     def render_signs(self, vao, mvp):
-        """Render billboards such as speed limit signs.
-
-        Signs should remain filled regardless of the global wireframe mode, so
-        this temporarily disables wireframe rendering while drawing the
-        geometry."""
+        """Render simple colored billboards such as sign posts."""
         was_wireframe = self.ctx.wireframe
         self.ctx.wireframe = False
         prog = vao.program
         prog['mvp'].write(mvp.T.tobytes())
+        vao.render(moderngl.TRIANGLES)
+        self.ctx.wireframe = was_wireframe
+
+    def render_billboard(self, vao, tex, mvp):
+        """Render a textured billboard (e.g. the speed limit sign face)."""
+        was_wireframe = self.ctx.wireframe
+        self.ctx.wireframe = False
+        prog = vao.program
+        prog['mvp'].write(mvp.T.tobytes())
+        tex.use(0)
+        prog['tex'] = 0
         vao.render(moderngl.TRIANGLES)
         self.ctx.wireframe = was_wireframe
 
