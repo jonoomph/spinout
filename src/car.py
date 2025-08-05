@@ -40,7 +40,7 @@ def collect_car_vertices(car, car_up, car_dir, dt, wheel_spin_accum):
         (0, 1), (0, 2), (0, 4), (1, 3), (1, 5), (2, 3), (2, 6),
         (3, 7), (4, 5), (4, 6), (5, 7), (6, 7)
     ]
-    car_color = [1.0, 0.0, 0.0, 1.0]
+    car_color = [252, 255, 255, 1.0]
     for a, b in edges:
         pa = world_corners[a]
         pb = world_corners[b]
