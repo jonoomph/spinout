@@ -127,7 +127,7 @@ while running:
             running = False
 
     keys = pygame.key.get_pressed()
-    steer, accel, brake, car_index = get_controls(keys)
+    steer_i, accel_i, brake_i, car_index = get_controls(keys)
     if car_index is not None and car_index != current_car_index:
         # Change car
         current_car_index = max(0, min(len(cars_data) - 1, car_index))
@@ -136,7 +136,7 @@ while running:
         car.body.pos = old_pos
         wheel_spin_accum = [0.0] * 4
 
-    car.steer, car.accel, car.brake = steer, accel, brake
+    car.apply_inputs(steer_i, accel_i, brake_i)
 
     for _ in range(substeps):
         car.update(dt / substeps)

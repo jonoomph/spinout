@@ -2,6 +2,6 @@ numpy
 noise
 scipy
 moderngl
-pygame
+pygame>=2.5.2
 pytest
 matplotlib

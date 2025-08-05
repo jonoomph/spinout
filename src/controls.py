@@ -1,11 +1,22 @@
-# controls.py
+"""Input handling for keyboard and controller.
+
+This module provides PS4/5 controller support via ``pygame.joystick``.  Steering
+and pedal inputs are quantised to discrete integer steps which are then
+normalised by the game loop before being applied to the physics layer.
+"""
+
+import pygame
 from pygame.locals import *
 
 STEER_MAX = 128
+ACCEL_MAX = 32
+BRAKE_MAX = 32
+
 _steer_idx = 0
 
 
 def _update_steer(keys):
+    """Return the discrete steering index for keyboard control."""
     global _steer_idx
     left = keys[K_LEFT]
     right = keys[K_RIGHT]
@@ -18,16 +29,95 @@ def _update_steer(keys):
             _steer_idx -= 1
         elif _steer_idx < 0:
             _steer_idx += 1
-    return _steer_idx / STEER_MAX
+    return _steer_idx
+
+
+def _quantize(value, maximum):
+    """Clamp and quantise ``value`` in ``[-1,1]`` or ``[0,1]`` to ``maximum`` steps."""
+    return max(-maximum, min(maximum, int(round(value * maximum))))
+
+
+def _trigger_value(raw):
+    """Convert raw trigger axis reading to ``[0,1]``.
+
+    Some controllers report triggers in ``[-1,1]`` with ``-1`` at rest while
+    others use ``[0,1]``.  This helper normalises both conventions.  A small
+    deadzone is also applied to filter noise from inactive axes.
+    """
+
+    if raw < 0:
+        raw = (raw + 1) / 2
+    value = max(0.0, min(1.0, raw))
+    return value if value > 0.05 else 0.0
+
+
+def _read_trigger(joystick, axes):
+    """Return the best reading from ``axes`` on ``joystick``.
+
+    Different systems expose PS4/5 triggers on different axes.  We sample a
+    set of candidates and return the largest value after normalisation.
+    """
+
+    values = [_trigger_value(joystick.get_axis(a)) for a in axes]
+    return max(values) if values else 0.0
 
 
 def get_controls(keys):
-    steer = _update_steer(keys)
-    accel = 1 if keys[K_UP] else 0
-    brake = 1 if keys[K_DOWN] else 0
+    """Return the current control state as discrete step values.
+
+    Handles Logitech-style wheels, PS4/5 controllers (with correct axis and sign), and keyboard input.
+    Returns (steer, accel, brake, car_index)
+    """
+    joystick = None
+    num_joysticks = pygame.joystick.get_count()
+    if num_joysticks > 0:
+        joystick = pygame.joystick.Joystick(0)
+        joystick.init()
+        pygame.event.pump()  # update joystick state
+
+        joy_name = joystick.get_name().lower()
+        num_axes = joystick.get_numaxes()
+
+        wheel_names = ("wheel", "logitech", "thrustmaster", "g29", "g920")
+        is_wheel = any(n in joy_name for n in wheel_names)
+
+        if is_wheel:
+            # Logitech wheel
+            steer_axis = -joystick.get_axis(0)  # Flip axis!
+            accel_axis = joystick.get_axis(2)
+            brake_axis = joystick.get_axis(3)
+            steer_val = _quantize(steer_axis, STEER_MAX)
+            accel_val = _quantize((1 - accel_axis) / 2, ACCEL_MAX)
+            brake_val = _quantize((1 - brake_axis) / 2, BRAKE_MAX)
+        else:
+            # PS4/5 controller: axis 0 (steer), axis 2 (brake), axis 5 (accel)
+            steer_axis = -joystick.get_axis(0)        # Flip for correct steering!
+            brake_axis = joystick.get_axis(2)         # L2: -1 (rest), +1 (pressed)
+            accel_axis = joystick.get_axis(5)         # R2: -1 (rest), +1 (pressed)
+
+            # Debug print (optional)
+            # print(f"PS4/5: steer_axis={steer_axis:.2f}, brake_axis={brake_axis:.2f}, accel_axis={accel_axis:.2f}")
+
+            steer_val = _quantize(steer_axis, STEER_MAX)
+            accel_val = _quantize((accel_axis + 1) / 2, ACCEL_MAX)
+            brake_val = _quantize((brake_axis + 1) / 2, BRAKE_MAX)
+
+    else:
+        # Keyboard fallback
+        steer_val = _update_steer(keys)
+        accel_val = ACCEL_MAX // 2
+        brake_val = BRAKE_MAX // 2
+        if keys[K_UP] and not keys[K_DOWN]:
+            accel_val = ACCEL_MAX
+            brake_val = 0
+        elif keys[K_DOWN] and not keys[K_UP]:
+            accel_val = 0
+            brake_val = BRAKE_MAX
+
     car_index = None
     for i in range(1, 10):
         if keys[K_1 + i - 1]:
             car_index = i - 1
             break
-    return steer, accel, brake, car_index
+
+    return steer_val, accel_val, brake_val, car_index

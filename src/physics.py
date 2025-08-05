@@ -3,6 +3,11 @@ import math
 import numpy as np
 from scipy.ndimage import gaussian_filter
 
+# Maximum discrete input steps shared with ``controls``.
+STEER_MAX = 128
+ACCEL_MAX = 32
+BRAKE_MAX = 32
+
 
 class Quaternion:
     def __init__(self, w=1, x=0, y=0, z=0):
@@ -331,6 +336,18 @@ class Car:
         self.accel = 0
         self.brake = 0
         self.drive_torque_per_wheel = 0.0
+
+    def apply_inputs(self, steer_steps, accel_steps, brake_steps):
+        """Apply discrete control steps to the car.
+
+        ``steer_steps`` is in ``[-128,128]`` and ``accel_steps``/``brake_steps``
+        are in ``[0,32]``.  They are normalised here so the rest of the physics
+        code continues to operate on ``[-1,1]`` / ``[0,1]`` ranges.
+        """
+
+        self.steer = steer_steps / STEER_MAX
+        self.accel = accel_steps / ACCEL_MAX
+        self.brake = brake_steps / BRAKE_MAX
 
     def _update_powertrain(self):
         driven = [w for w in self.wheels if w.is_driven]
