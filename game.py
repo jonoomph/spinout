@@ -12,7 +12,7 @@ from src.controls import get_controls
 from src.hud import render_hud
 from src.render import RenderContext
 from src.utils import compute_mvp
-from src.terrain import build_terrain_vertices
+from src.terrain import build_terrain_triangles
 from src.car import collect_car_vertices
 
 
@@ -88,12 +88,25 @@ apply_plan(terrain, road_points, road_plan, rng=rng)
 
 show_loading(0.8, "Building meshes...", screen, loading_font)
 render_ctx = RenderContext(width, height)
-road_vbo = render_ctx.ctx.buffer(
-    build_road_vertices(terrain, road_points, **road_plan).tobytes()
-)
+road_vertices = build_road_vertices(terrain, road_points, **road_plan)
+road_vbo = render_ctx.ctx.buffer(road_vertices.tobytes())
 road_vao = render_ctx.ctx.vertex_array(render_ctx.prog, road_vbo, 'in_vert', 'in_color')
-terrain_vbo = render_ctx.ctx.buffer(build_terrain_vertices(terrain).tobytes())
+road_vertices_lit = np.hstack([
+    road_vertices.reshape(-1, 7)[:, :3],
+    np.tile([0.0, 1.0, 0.0], (road_vertices.size // 7, 1)),
+    road_vertices.reshape(-1, 7)[:, 3:7],
+]).astype('f4')
+road_vbo_lit = render_ctx.ctx.buffer(road_vertices_lit.tobytes())
+road_vao_lit = render_ctx.ctx.vertex_array(
+    render_ctx.prog_lit, road_vbo_lit, 'in_vert', 'in_normal', 'in_color'
+)
+terrain_basic, terrain_lit = build_terrain_triangles(terrain)
+terrain_vbo = render_ctx.ctx.buffer(terrain_basic.tobytes())
 terrain_vao = render_ctx.ctx.vertex_array(render_ctx.prog, terrain_vbo, 'in_vert', 'in_color')
+terrain_vbo_lit = render_ctx.ctx.buffer(terrain_lit.tobytes())
+terrain_vao_lit = render_ctx.ctx.vertex_array(
+    render_ctx.prog_lit, terrain_vbo_lit, 'in_vert', 'in_normal', 'in_color'
+)
 
 show_loading(1.0, "Starting engines...", screen, loading_font)
 time.sleep(0.5)
@@ -112,6 +125,7 @@ car.body.pos = car_pos
 car.body.rot = car_rot
 
 running = True
+render_mode = 0
 font = pygame.font.SysFont(None, 24)
 substeps = 2
 wheel_spin_accum = [0.0] * 4
@@ -125,6 +139,13 @@ while running:
     for event in pygame.event.get():
         if event.type == QUIT:
             running = False
+        elif event.type == KEYDOWN:
+            if event.key == K_F1:
+                render_mode = 0
+            elif event.key == K_F2:
+                render_mode = 1
+            elif event.key == K_F3:
+                render_mode = 2
 
     keys = pygame.key.get_pressed()
     steer_i, accel_i, brake_i, car_index = get_controls(keys)
@@ -154,9 +175,12 @@ while running:
     camera_up /= np.linalg.norm(camera_up)
 
     mvp = compute_mvp(width, height, camera_pos, camera_right, camera_forward, camera_up)
+    render_ctx.set_mode(render_mode)
     render_ctx.clear()
-    render_ctx.render_terrain(terrain_vao, mvp)
-    render_ctx.render_terrain(road_vao, mvp)
+    t_vao = terrain_vao_lit if render_mode == 2 else terrain_vao
+    r_vao = road_vao_lit if render_mode == 2 else road_vao
+    render_ctx.render_terrain(t_vao, mvp)
+    render_ctx.render_terrain(r_vao, mvp)
     render_ctx.render_car(collect_car_vertices(car, car_up, car_dir, dt, wheel_spin_accum), mvp)
 
     speed_mph = np.linalg.norm(car.body.vel) * 2.23694
@@ -181,6 +205,7 @@ while running:
         rpm=car.engine_rpm,
         gear=car.current_gear,
         surface_info=surface_info,
+        render_mode=render_mode,
     )
     render_ctx.render_hud(hud_surf)
 

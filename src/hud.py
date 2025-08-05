@@ -13,6 +13,7 @@ def render_hud(
     rpm=None,
     gear=None,
     surface_info=None,
+    render_mode=0,
 ):
     hud_surf.fill((0, 0, 0, 0))
     if rpm is not None and gear is not None:
@@ -39,3 +40,10 @@ def render_hud(
     if surface_info:
         text_surface = font.render(surface_info, True, (255, 255, 255, 255))
         hud_surf.blit(text_surface, (10, 160))
+    mode_names = {0: "Wireframe", 1: "Solid", 2: "Sunlit"}
+    text_mode = font.render(
+        f"Render: {mode_names.get(render_mode, '?')} (F1/F2/F3)",
+        True,
+        (255, 255, 255, 255),
+    )
+    hud_surf.blit(text_mode, (10, 190))

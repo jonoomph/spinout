@@ -229,6 +229,7 @@ def build_road_vertices(
         text = text.upper()
         width = len(text) * _CHAR_SPACING
         start = -0.5 * width
+        thickness = 0.05 * scale
         for i, ch in enumerate(text):
             segs = _CHAR_LINES.get(ch)
             if not segs:
@@ -237,8 +238,15 @@ def build_road_vertices(
             for (p0, p1) in segs:
                 w0 = center + right * ((p0[0] + x_off) * scale) + up * (p0[1] * scale)
                 w1 = center + right * ((p1[0] + x_off) * scale) + up * (p1[1] * scale)
-                verts.extend(w0.tolist() + color)
-                verts.extend(w1.tolist() + color)
+                dir_vec = w1 - w0
+                side = np.cross(up, dir_vec)
+                side /= np.linalg.norm(side) + 1e-8
+                half = side * (thickness * 0.5)
+                a = (w0 - half).tolist()
+                b = (w0 + half).tolist()
+                c = (w1 - half).tolist()
+                d = (w1 + half).tolist()
+                emit_quad(a, b, c, d, color)
 
     path_np = [np.array(p, float) for p in path]
     period = cfg.DASH_LENGTH + cfg.GAP_LENGTH
@@ -310,22 +318,22 @@ def build_road_vertices(
 
                     xl0 = c0[0] + nrm2[0] * left_off
                     zl0 = c0[1] + nrm2[1] * left_off
-                    yl0 = base_height(xl0, zl0) + cfg.ROAD_EPS
+                    yl0 = base_height(xl0, zl0) + cfg.LINE_EPS
                     vert_l0 = [xl0, yl0, zl0]
 
                     xr0 = c0[0] + nrm2[0] * right_off
                     zr0 = c0[1] + nrm2[1] * right_off
-                    yr0 = base_height(xr0, zr0) + cfg.ROAD_EPS
+                    yr0 = base_height(xr0, zr0) + cfg.LINE_EPS
                     vert_r0 = [xr0, yr0, zr0]
 
                     xl1 = c1[0] + nrm2[0] * left_off
                     zl1 = c1[1] + nrm2[1] * left_off
-                    yl1 = base_height(xl1, zl1) + cfg.ROAD_EPS
+                    yl1 = base_height(xl1, zl1) + cfg.LINE_EPS
                     vert_l1 = [xl1, yl1, zl1]
 
                     xr1 = c1[0] + nrm2[0] * right_off
                     zr1 = c1[1] + nrm2[1] * right_off
-                    yr1 = base_height(xr1, zr1) + cfg.ROAD_EPS
+                    yr1 = base_height(xr1, zr1) + cfg.LINE_EPS
                     vert_r1 = [xr1, yr1, zr1]
 
                     emit_quad(vert_l0, vert_r0, vert_l1, vert_r1, col)
