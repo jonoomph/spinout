@@ -14,6 +14,7 @@ def render_hud(
     gear: int | None = None,
     surface_info: str | None = None,
     render_mode: int = 0,
+    camera_mode: int = 0,
 ) -> None:
     """
     Draw a slim top-bar HUD onto hud_surf.
@@ -61,6 +62,7 @@ def render_hud(
 
     # small-text clusters
     mode_names = {0: "Wireframe", 1: "Solid", 2: "Sunlit"}
+    cam_names = {0: "Follow Far", 1: "Follow Near", 2: "Driver"}
     line_h = font_small.get_height() + 3
 
     # left cluster: FPS, car, surface
@@ -84,7 +86,7 @@ def render_hud(
             (x_left, y),
         )
 
-    # right cluster: steer & mode
+    # right cluster: steer, mode, camera
     x_right, y = w - 10, 10
     steer_txt = f"Steer: {math.degrees(steer_angle):.1f}°"
     surf_steer = font_small.render(steer_txt, True, (255, 255, 255))
@@ -96,3 +98,9 @@ def render_hud(
     surf_mode = font_small.render(mode_txt, True, (255, 255, 255))
     rect_mode = surf_mode.get_rect(topright=(x_right, y))
     hud_surf.blit(surf_mode, rect_mode)
+
+    y += line_h
+    cam_txt = f"Camera: {cam_names.get(camera_mode, '?')} (C)"
+    surf_cam = font_small.render(cam_txt, True, (255, 255, 255))
+    rect_cam = surf_cam.get_rect(topright=(x_right, y))
+    hud_surf.blit(surf_cam, rect_cam)
