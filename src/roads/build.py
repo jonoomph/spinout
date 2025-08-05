@@ -151,34 +151,26 @@ def build_road_vertices(
     cross_pitch: float,
     ditch_width: float | None = None,
     road_color=cfg.ROAD_COL,
-    skirt_color=cfg.SKIRT_COL,
     drive_line: List[Tuple[float, float]] | None = None,
-    speed_limits: List[dict] | None = None,
     **_: dict,
 ) -> np.ndarray:
     if ditch_width is None:
         ditch_width = cfg.DITCH_WIDTH_MAX
 
+    # helper to sample terrain height
     def base_height(x: float, z: float) -> float:
         return float(terrain.get_height(x, z))
 
     cell = terrain.cell_size
     along_step = max(cell * cfg.ALONG_STEP_FACTOR, 0.35)
-
     half_road = 0.5 * lane_width * lanes
     half_plus_sh = half_road + shoulder
 
+    # offsets for road deck
     gray_offsets = np.linspace(-half_plus_sh, half_plus_sh, max(6, lanes * 3 + 3))
-    skirt_offsets = [half_plus_sh + (j + 1) * (ditch_width / cfg.SKIRT_RINGS) for j in range(cfg.SKIRT_RINGS)]
 
-    # Compute cumulative distance along path
-    s = [0.0]
-    for p_prev, p_curr in zip(path[:-1], path[1:]):
-        dist = math.sqrt((p_curr[0] - p_prev[0])**2 + (p_curr[1] - p_prev[1])**2)
-        s.append(s[-1] + dist)
-
-    # Define lane marking lines: (offset, color, dotted)
-    lines_list = []
+    # prepare lane-marking definitions
+    lines_list: list[tuple[float, list[float], bool]] = []
     left_edge_off = -half_plus_sh
     right_edge_off = half_plus_sh
     left_edge_col = cfg.YELLOW_COL if lanes == 1 else cfg.WHITE_COL
@@ -187,138 +179,136 @@ def build_road_vertices(
         off = -half_road + k * lane_width
         is_yellow = False
         if lanes % 2 == 0:
-            if abs(off) < 1e-3:  # center
+            if abs(off) < 1e-3:
                 is_yellow = True
         else:
-            if lanes > 1:
-                mid_left = -half_road + (lanes // 2) * lane_width
-                mid_right = mid_left + lane_width
-                if abs(off - mid_left) < 1e-3 or abs(off - mid_right) < 1e-3:
-                    is_yellow = True
+            mid_left = -half_road + (lanes // 2) * lane_width
+            mid_right = mid_left + lane_width
+            if abs(off - mid_left) < 1e-3 or abs(off - mid_right) < 1e-3:
+                is_yellow = True
         col = cfg.YELLOW_COL if is_yellow else cfg.WHITE_COL
         dotted = not is_yellow
         lines_list.append((off, col, dotted))
     lines_list.append((right_edge_off, cfg.WHITE_COL, False))
 
-    verts: list[float] = []
+    # dash and line width
+    period = cfg.DASH_LENGTH + cfg.GAP_LENGTH
+    line_half = cfg.LINE_WIDTH * 0.5
 
+    # convert path and s-path
+    path_np = [np.array(p, float) for p in path]
+    s_path = [0.0]
+    for p0, p1 in zip(path_np[:-1], path_np[1:]):
+        s_path.append(s_path[-1] + np.linalg.norm(p1 - p0))
+
+    # sample centerline into (pos, normal, s)
+    samples: list[tuple[np.ndarray, np.ndarray, float]] = []
+    for ii, (p0, p1) in enumerate(zip(path_np[:-1], path_np[1:])):
+        seg = p1 - p0
+        L = np.linalg.norm(seg)
+        if L < 1e-6:
+            continue
+        dir2 = seg / L
+        nrm2 = np.array([-dir2[1], dir2[0]], dtype=float)
+        nsteps = max(2, int(L / along_step))
+        for k in range(nsteps):
+            frac = k / nsteps
+            c = p0 + dir2 * (L * frac)
+            s_val = s_path[ii] + L * frac
+            samples.append((c, nrm2, s_val))
+    # include final point
+    if len(path_np) >= 2:
+        last = path_np[-1]
+        prev = path_np[-2]
+        dir_last = last - prev
+        if np.linalg.norm(dir_last) > 1e-6:
+            dir_last /= np.linalg.norm(dir_last)
+        nrm_last = np.array([-dir_last[1], dir_last[0]], dtype=float)
+        samples.append((last, nrm_last, s_path[-1]))
+
+    # build deck rings
+    rings: list[list[list[float]]] = []
+    for (c, nrm2, _) in samples:
+        ring = []
+        for off in gray_offsets:
+            x = c[0] + nrm2[0] * off
+            z = c[1] + nrm2[1] * off
+            y = base_height(x, z) + cfg.ROAD_EPS
+            ring.append([x, y, z])
+        rings.append(ring)
+
+    verts: list[float] = []
     def emit_quad(a, b, c, d, col):
         verts.extend(a + col); verts.extend(b + col); verts.extend(c + col)
         verts.extend(c + col); verts.extend(b + col); verts.extend(d + col)
 
-    path_np = [np.array(p, float) for p in path]
-    period = cfg.DASH_LENGTH + cfg.GAP_LENGTH
-    line_half = cfg.LINE_WIDTH / 2.0
+    # connect deck
+    for i in range(len(rings) - 1):
+        r0, r1 = rings[i], rings[i + 1]
+        for j in range(len(r0) - 1):
+            emit_quad(r0[j], r0[j + 1], r1[j], r1[j + 1], road_color)
 
-    for ii, (p0, p1) in enumerate(zip(path_np[:-1], path_np[1:])):
-        seg = p1 - p0
-        L = float(np.linalg.norm(seg))
-        if L <= 1e-6:
-            continue
-        dir2 = seg / L
-        nrm2 = np.array([-dir2[1], dir2[0]], dtype=float)
+    # lane markings extrusion
+    for off, col, dotted in lines_list:
+        prev_pair = None
+        prev_emit = False
+        for (c, nrm2, s_val) in samples:
+            emit = True
+            if dotted:
+                emit = (s_val % period) < cfg.DASH_LENGTH
+            left_off = off - line_half
+            right_off = off + line_half
+            a = np.array([
+                c[0] + nrm2[0] * left_off,
+                base_height(c[0] + nrm2[0] * left_off, c[1] + nrm2[1] * left_off) + cfg.LINE_EPS,
+                c[1] + nrm2[1] * left_off
+            ]).tolist()
+            b = np.array([
+                c[0] + nrm2[0] * right_off,
+                base_height(c[0] + nrm2[0] * right_off, c[1] + nrm2[1] * right_off) + cfg.LINE_EPS,
+                c[1] + nrm2[1] * right_off
+            ]).tolist()
+            this_pair = [a, b]
+            if prev_pair is not None and emit and prev_emit:
+                emit_quad(prev_pair[0], prev_pair[1], this_pair[0], this_pair[1], col)
+            prev_pair = this_pair
+            prev_emit = emit
 
-        nsteps = max(2, int(L / along_step))
-        for k in range(nsteps):
-            frac0 = k / nsteps
-            frac1 = (k + 1) / nsteps
-            c0 = p0 + dir2 * (L * frac0)
-            c1 = p0 + dir2 * (L * frac1)
-
-            deck0 = []
-            deck1 = []
-            for off in gray_offsets:
-                x0 = c0[0] + nrm2[0] * off
-                z0 = c0[1] + nrm2[1] * off
-                y0 = base_height(x0, z0) + cfg.ROAD_EPS
-                deck0.append([x0, y0, z0])
-
-                x1 = c1[0] + nrm2[0] * off
-                z1 = c1[1] + nrm2[1] * off
-                y1 = base_height(x1, z1) + cfg.ROAD_EPS
-                deck1.append([x1, y1, z1])
-            for j in range(len(gray_offsets) - 1):
-                emit_quad(deck0[j], deck0[j + 1], deck1[j], deck1[j + 1], road_color)
-
-            # skirts on each side
-            for side in (-1.0, +1.0):
-                edge_idx = -1 if side > 0 else 0
-                ring_prev0 = deck0[edge_idx]
-                ring_prev1 = deck1[edge_idx]
-                edge_y0 = ring_prev0[1] - cfg.ROAD_EPS  # subtract eps to compute blend, then add back
-                edge_y1 = ring_prev1[1] - cfg.ROAD_EPS
-                for j in range(cfg.SKIRT_RINGS):
-                    off = skirt_offsets[j]
-                    d = off * side
-                    x0 = c0[0] + nrm2[0] * d; z0 = c0[1] + nrm2[1] * d
-                    x1 = c1[0] + nrm2[0] * d; z1 = c1[1] + nrm2[1] * d
-                    t = (off - half_plus_sh) / max(ditch_width, 1e-6)
-                    t = min(max(t, 0.0), 1.0)
-                    y0 = (1 - t) * edge_y0 + t * float(base_height(x0, z0)) + cfg.ROAD_EPS
-                    y1 = (1 - t) * edge_y1 + t * float(base_height(x1, z1)) + cfg.ROAD_EPS
-                    ring0 = [x0, y0, z0]
-                    ring1 = [x1, y1, z1]
-                    emit_quad(ring_prev0, ring0, ring_prev1, ring1, skirt_color)
-                    ring_prev0, ring_prev1 = ring0, ring1
-
-            # lane markings (per sub-segment)
-            sub_s0 = s[ii] + frac0 * L
-            sub_s1 = s[ii] + frac1 * L
-            mid_sub_s = (sub_s0 + sub_s1) / 2.0
-            for off, col, dotted in lines_list:
-                should_emit = True
-                if dotted:
-                    mod = mid_sub_s % period
-                    should_emit = mod < cfg.DASH_LENGTH
-                if should_emit:
-                    left_off = off - line_half
-                    right_off = off + line_half
-
-                    xl0 = c0[0] + nrm2[0] * left_off
-                    zl0 = c0[1] + nrm2[1] * left_off
-                    yl0 = base_height(xl0, zl0) + cfg.LINE_EPS
-                    vert_l0 = [xl0, yl0, zl0]
-
-                    xr0 = c0[0] + nrm2[0] * right_off
-                    zr0 = c0[1] + nrm2[1] * right_off
-                    yr0 = base_height(xr0, zr0) + cfg.LINE_EPS
-                    vert_r0 = [xr0, yr0, zr0]
-
-                    xl1 = c1[0] + nrm2[0] * left_off
-                    zl1 = c1[1] + nrm2[1] * left_off
-                    yl1 = base_height(xl1, zl1) + cfg.LINE_EPS
-                    vert_l1 = [xl1, yl1, zl1]
-
-                    xr1 = c1[0] + nrm2[0] * right_off
-                    zr1 = c1[1] + nrm2[1] * right_off
-                    yr1 = base_height(xr1, zr1) + cfg.LINE_EPS
-                    vert_r1 = [xr1, yr1, zr1]
-
-                    emit_quad(vert_l0, vert_r0, vert_l1, vert_r1, col)
-    # Driveline rendering
+    # green driveline extrusion
     if drive_line:
-        dl_pts = [np.array([x, base_height(x, z) + cfg.DRIVE_LINE_HEIGHT, z]) for x, z in drive_line]
+        half_dl = cfg.DRIVE_LINE_WIDTH * 0.5
         green = [0.0, 1.0, 0.0, 1.0]
-        half = cfg.DRIVE_LINE_WIDTH * 0.5
-
-        def emit_dl_quad(v0, v1, v2, v3):
-            verts.extend(v0 + green); verts.extend(v1 + green); verts.extend(v3 + green)
-            verts.extend(v0 + green); verts.extend(v3 + green); verts.extend(v2 + green)
-
-        for a, b in zip(dl_pts[:-1], dl_pts[1:]):
-            seg = b - a
+        prev_pair = None
+        for p0, p1 in zip(drive_line[:-1], drive_line[1:]):
+            a0 = np.array([p0[0], base_height(p0[0], p0[1]) + cfg.DRIVE_LINE_HEIGHT, p0[1]])
+            a1 = np.array([p1[0], base_height(p1[0], p1[1]) + cfg.DRIVE_LINE_HEIGHT, p1[1]])
+            seg = a1 - a0
             dir2 = np.array([seg[0], seg[2]], dtype=float)
-            L = float(np.linalg.norm(dir2))
-            if L <= 1e-6:
+            L = np.linalg.norm(dir2)
+            if L < 1e-6:
                 continue
             dir2 /= L
             nrm2 = np.array([-dir2[1], dir2[0]], dtype=float)
-            offset = np.array([nrm2[0] * half, 0.0, nrm2[1] * half])
-            v0 = (a + offset).tolist()
-            v1 = (a - offset).tolist()
-            v2 = (b + offset).tolist()
-            v3 = (b - offset).tolist()
-            emit_dl_quad(v0, v1, v2, v3)
+            left = (a0 + np.array([nrm2[0]*half_dl, 0, nrm2[1]*half_dl])).tolist()
+            right= (a0 - np.array([nrm2[0]*half_dl, 0, nrm2[1]*half_dl])).tolist()
+            this_pair = [left, right]
+            if prev_pair is not None:
+                emit_quad(prev_pair[0], prev_pair[1], this_pair[0], this_pair[1], green)
+            prev_pair = this_pair
+
+    return np.array(verts, dtype="f4")
+
+
+    # emit quads by connecting ring[i] to ring[i+1]
+    verts: list[float] = []
+    def emit_quad(a, b, c, d, col):
+        verts.extend(a + col); verts.extend(b + col); verts.extend(c + col)
+        verts.extend(c + col); verts.extend(b + col); verts.extend(d + col)
+
+    for i in range(len(rings) - 1):
+        r0, r1 = rings[i], rings[i + 1]
+        for j in range(len(r0) - 1):
+            emit_quad(r0[j], r0[j + 1], r1[j], r1[j + 1], road_color)
 
     return np.array(verts, dtype="f4")
 
