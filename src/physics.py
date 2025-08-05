@@ -283,13 +283,27 @@ class Car:
         ground_clearance = car_data["ground_clearance_m"]
         drive_type = car_data["drive_type"]
 
+        # Optional steering response tuning. ``strength`` blends between
+        # linear (0) and cubic (1) response while ``gain`` scales the result.
+        steer_curve = car_data.get("steering_curve", {})
+        self.steer_curve_gain = steer_curve.get("gain", 1.0)
+        self.steer_curve_strength = steer_curve.get("strength", 0.5)
+        # Maximum steering angle at very low speed and scaling factor for
+        # speed-sensitive limiting (speed at which the limit halves).
+        self.max_steer_angle = math.radians(car_data.get("steer_angle_deg", 30))
+        self.speed_steer_scale = car_data.get("steering_speed_scale", 10.0)
+
+        # Tire stiffness controls how quickly forces saturate with slip and slip angle.
+        tire_stiffness = car_data.get("tire_stiffness", {})
+        self.long_stiffness = tire_stiffness.get("longitudinal", 10.0)
+        self.lat_stiffness = tire_stiffness.get("lateral", 5.0)
+
         self.body = RigidBody(mass, inertia)
         self.dimensions = dimensions
         self.weight_distribution = weight_distribution
         self.ground_clearance = ground_clearance
         self.drag_coeff = drag_coeff
         self.tire_width = tire_width
-        self.steer_limit = math.radians(30)
         self.is_upside_down = False
 
         # Calculate body_offset for rendering to ensure correct height after compression
@@ -345,9 +359,23 @@ class Car:
         code continues to operate on ``[-1,1]`` / ``[0,1]`` ranges.
         """
 
-        self.steer = steer_steps / STEER_MAX
+        raw = steer_steps / STEER_MAX
+        self.steer = self._steering_curve(raw)
         self.accel = accel_steps / ACCEL_MAX
         self.brake = brake_steps / BRAKE_MAX
+
+    def _steering_curve(self, x):
+        """Map raw steering input ``x`` in ``[-1,1]`` through a shallow S curve.
+
+        ``steer_curve_strength`` blends between linear and cubic response while
+        ``steer_curve_gain`` scales the result.  The output is clamped back to
+        ``[-1, 1]``.
+        """
+
+        f = self.steer_curve_strength
+        curved = (1 - f) * x + f * x**3
+        curved *= self.steer_curve_gain
+        return max(-1.0, min(1.0, curved))
 
     def _update_powertrain(self):
         driven = [w for w in self.wheels if w.is_driven]
@@ -454,8 +482,10 @@ class Car:
         load = normal_f
         contact_vel = vel_at - normal * np.dot(vel_at, normal)
         if wheel.is_front:
-            target = -self.steer * self.steer_limit
-            wheel.target_steer = np.clip(target, -self.steer_limit, self.steer_limit)
+            speed = np.linalg.norm(self.body.vel)
+            steer_limit = self.max_steer_angle / (1 + speed / self.speed_steer_scale)
+            target = -self.steer * steer_limit
+            wheel.target_steer = np.clip(target, -steer_limit, steer_limit)
             wheel.steer_angle += (wheel.target_steer - wheel.steer_angle) * 5 * dt
         else:
             wheel.steer_angle = 0
@@ -471,13 +501,13 @@ class Car:
         lat_v = np.dot(contact_vel, right)
         alpha = math.atan2(lat_v, abs(long_v) + 0.1)
         slip = (wheel.ang_vel * wheel.radius - long_v) / (abs(long_v) + 0.1)
-        long_f = 80000 * slip
-        lat_f = -80000 * alpha
         is_static = self.brake > 0 and abs(long_v) < 0.3 and abs(wheel.ang_vel) < 0.1
         mu = 1.4 if is_static else 1.2
         mu *= self.terrain.get_friction(pos[0], pos[2])
         width_factor = wheel.width / 0.2
         max_fric = mu * load * width_factor
+        long_f = max_fric * math.tanh(self.long_stiffness * slip)
+        lat_f = -max_fric * math.tanh(self.lat_stiffness * alpha)
         gravity_pw = g_front if wheel.is_front else g_rear
         if is_static:
             proj_g = gravity_pw - np.dot(gravity_pw, normal) * normal

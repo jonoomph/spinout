@@ -105,13 +105,11 @@ def get_controls(keys):
     else:
         # Keyboard fallback
         steer_val = _update_steer(keys)
-        accel_val = ACCEL_MAX // 2
-        brake_val = BRAKE_MAX // 2
+        accel_val = 0
+        brake_val = 0
         if keys[K_UP] and not keys[K_DOWN]:
             accel_val = ACCEL_MAX
-            brake_val = 0
         elif keys[K_DOWN] and not keys[K_UP]:
-            accel_val = 0
             brake_val = BRAKE_MAX
 
     car_index = None
