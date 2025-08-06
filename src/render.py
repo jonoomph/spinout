@@ -31,6 +31,11 @@ class RenderContext:
         self.shock_vbo = None
         self.main_vao = None
         self.shock_vao = None
+        self.model_vbo = None
+        self.model_vao = None
+        self.model_edge_vbo = None
+        self.model_edge_vao = None
+        self.car_model_tex = None
 
         # Gradient skybox: light gray ground -> white horizon band -> blue sky
         bottom = [0.8, 0.8, 0.8, 1.0]
@@ -115,6 +120,51 @@ class RenderContext:
                 self.shock_vbo.write(shock_data, offset=0)
             self.ctx.line_width = 3.0
             self.shock_vao.render(moderngl.LINES)
+
+    def render_car_model(self, vertices, mvp):
+        """Draw either wireframe or textured model using explicit VAO layouts."""
+        tri_vertices, edge_vertices = vertices
+
+        if self.ctx.wireframe:
+            if not edge_vertices:
+                return
+            data = np.asarray(edge_vertices, 'f4').tobytes()
+            if self.model_edge_vbo is None or len(data) > self.model_edge_vbo.size:
+                if self.model_edge_vbo:
+                    self.model_edge_vbo.release()
+                self.model_edge_vbo = self.ctx.buffer(data)
+                # 3 floats pos + 4 floats color
+                self.model_edge_vao = self.ctx.vertex_array(
+                    self.prog,
+                    [(self.model_edge_vbo, '3f 4f', 'in_vert', 'in_color')],
+                )
+            else:
+                self.model_edge_vbo.write(data, 0)
+            self.prog['mvp'].write(mvp.T.tobytes())
+            self.ctx.line_width = 1.0
+            self.model_edge_vao.render(moderngl.LINES)
+            return
+
+        if not tri_vertices:
+            return
+        data = np.asarray(tri_vertices, 'f4').tobytes()
+        if self.model_vbo is None or len(data) > self.model_vbo.size:
+            if self.model_vbo:
+                self.model_vbo.release()
+            self.model_vbo = self.ctx.buffer(data)
+            # 3 floats pos + 2 floats UV
+            self.model_vao = self.ctx.vertex_array(
+                self.prog_tex,
+                [(self.model_vbo, '3f 2f', 'in_vert', 'in_tex')],
+            )
+        else:
+            self.model_vbo.write(data, 0)
+
+        self.prog_tex['mvp'].write(mvp.T.tobytes())
+        if self.car_model_tex:
+            self.car_model_tex.use(0)
+            self.prog_tex['tex'] = 0
+        self.model_vao.render(moderngl.TRIANGLES)
 
     def render_skybox(self):
         # Always render the skybox filled even if the main scene uses wireframe

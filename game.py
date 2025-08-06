@@ -16,6 +16,7 @@ from src.render import RenderContext
 from src.utils import compute_mvp
 from src.terrain import build_terrain_triangles
 from src.car import collect_car_vertices
+from src.bbmodel import load_bbmodel, collect_car_model_vertices
 
 # Screen dimensions and constants
 WIDTH, HEIGHT = 1854, 1168
@@ -86,6 +87,14 @@ pygame.display.set_caption("Spinout")
 clock = pygame.time.Clock()
 render_ctx = RenderContext(WIDTH, HEIGHT)
 
+# Load Blockbench car model and upload its texture
+car_model_data = load_bbmodel("data/car.bbmodel")
+car_tex = render_ctx.ctx.texture(
+    car_model_data["texture_size"], 4, car_model_data["texture_bytes"]
+)
+car_tex.filter = (moderngl.NEAREST, moderngl.NEAREST)
+render_ctx.car_model_tex = car_tex
+
 # Road VAOs
 road_verts = build_road_vertices(terrain, rp, **plan)
 road_vbo = render_ctx.ctx.buffer(road_verts.tobytes())
@@ -154,6 +163,7 @@ mode = 0
 substeps = 2
 wheel_acc = [0.0] * 4
 camera_mode = 0
+use_bbmodel = False
 while running:
     t0 = time.time()
     dt = clock.tick(60) / 1000
@@ -172,6 +182,8 @@ while running:
                 mode = 2
             elif e.key == K_c:
                 camera_mode = (camera_mode + 1) % 3
+            elif e.key == K_b:
+                use_bbmodel = not use_bbmodel
 
     # controls & car switching
     s_i, a_i, b_i, new = get_controls(pygame.key.get_pressed())
@@ -225,9 +237,12 @@ while running:
     if sign_post_vao: render_ctx.render_signs(sign_post_vao, mvp)
     for vao, tex in sign_billboards:
         render_ctx.render_billboard(vao, tex, mvp)
-    render_ctx.render_car(
-        collect_car_vertices(car, car_up_vec, car_dir, dt, wheel_acc),
-        mvp)
+    car_lines = collect_car_vertices(car, car_up_vec, car_dir, dt, wheel_acc)
+    if use_bbmodel:
+        model_verts = collect_car_model_vertices(car, car_model_data)
+        render_ctx.render_car_model(model_verts, mvp)
+    else:
+        render_ctx.render_car(car_lines, mvp)
 
     # HUD
     spd = np.linalg.norm(car.body.vel) * 2.23694
