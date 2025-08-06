@@ -29,7 +29,7 @@ ROAD_TYPES = {
 }
 
 TERRAIN_TYPES = {
-    "grass": {"color": [34 / 255, 139 / 255, 34 / 255, 1.0], "friction": 0.7},
+    "grass": {"color": [110 / 255, 188 / 255, 56 / 255, 1.0], "friction": 0.7},
     "sand": {"color": [0.76, 0.70, 0.50, 1.0], "friction": 0.6},
     "snow": {"color": [1.0, 1.0, 1.0, 1.0], "friction": 0.5},
 }
