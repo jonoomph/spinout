@@ -12,7 +12,10 @@ STEER_MAX = 128
 ACCEL_MAX = 32
 BRAKE_MAX = 32
 
+# Cache joystick state so we don't repeatedly create/initialise it every frame
 _steer_idx = 0
+_joystick = None
+_is_wheel = False
 
 
 def _update_steer(keys):
@@ -62,38 +65,47 @@ def _read_trigger(joystick, axes):
     return max(values) if values else 0.0
 
 
+def _init_joystick():
+    """Lazily initialise and cache the first available joystick."""
+    global _joystick, _is_wheel
+    if _joystick is not None:
+        return
+    # Joystick module may need explicit initialisation
+    if not pygame.joystick.get_init():
+        pygame.joystick.init()
+    if pygame.joystick.get_count() > 0:
+        js = pygame.joystick.Joystick(0)
+        js.init()
+        name = js.get_name().lower()
+        wheel_names = ("wheel", "logitech", "thrustmaster", "g29", "g920")
+        _joystick = js
+        _is_wheel = any(n in name for n in wheel_names)
+
+
 def get_controls(keys):
     """Return the current control state as discrete step values.
 
     Handles Logitech-style wheels, PS4/5 controllers (with correct axis and sign), and keyboard input.
     Returns (steer, accel, brake, car_index)
     """
-    joystick = None
-    num_joysticks = pygame.joystick.get_count()
-    if num_joysticks > 0:
-        joystick = pygame.joystick.Joystick(0)
-        joystick.init()
+    _init_joystick()
+
+    if _joystick is not None:
         pygame.event.pump()  # update joystick state
 
-        joy_name = joystick.get_name().lower()
-        num_axes = joystick.get_numaxes()
-
-        wheel_names = ("wheel", "logitech", "thrustmaster", "g29", "g920")
-        is_wheel = any(n in joy_name for n in wheel_names)
-
-        if is_wheel:
-            # Logitech wheel
-            steer_axis = -joystick.get_axis(0)  # Flip axis!
-            accel_axis = joystick.get_axis(2)
-            brake_axis = joystick.get_axis(3)
+        if _is_wheel:
+            # Logitech-style wheel
+            steer_axis = -_joystick.get_axis(0)  # Flip axis!
+            accel_axis = _joystick.get_axis(2)
+            brake_axis = _joystick.get_axis(3)
             steer_val = _quantize(steer_axis, STEER_MAX)
             accel_val = _quantize((1 - accel_axis) / 2, ACCEL_MAX)
             brake_val = _quantize((1 - brake_axis) / 2, BRAKE_MAX)
         else:
             # PS4/5 controller: axis 0 (steer), axis 2 (brake), axis 5 (accel)
-            steer_axis = -joystick.get_axis(0)        # Flip for correct steering!
-            brake_axis = joystick.get_axis(2)         # L2: -1 (rest), +1 (pressed)
-            accel_axis = joystick.get_axis(5)         # R2: -1 (rest), +1 (pressed)
+            steer_axis = -_joystick.get_axis(0)        # Flip for correct steering!
+            brake_axis = _joystick.get_axis(2)         # L2: -1 (rest), +1 (pressed)
+            accel_axis = _joystick.get_axis(5)         # R2: -1 (rest), +1 (pressed)
 
             # Debug print (optional)
             # print(f"PS4/5: steer_axis={steer_axis:.2f}, brake_axis={brake_axis:.2f}, accel_axis={accel_axis:.2f}")
