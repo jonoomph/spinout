@@ -160,7 +160,7 @@ hud_h = big.get_height() * 2
 # Main loop
 running = True
 mode = 0
-substeps = 2
+substeps = 4
 wheel_acc = [0.0] * 4
 camera_mode = 0
 use_bbmodel = False
