@@ -9,7 +9,10 @@
 **Spinout** is a fast, minimal, OpenGL-accelerated driving simulator built to test and train **AI controllers** (PID, RL, or custom models) in **accurate vehicle dynamics** over **randomly generated terrain and roads**.  
 
 Forget the bloated dependencies and high-fidelity rendering of other simulators—Spinout is all about **speed, physics accuracy, and control evaluation**.
-![screenshot.png](img/screenshot.png)
+![asphault.png](img/asphault.png)
+![snow.png](img/snow.png)
+![dirt.png](img/dirt.png)
+![gravel.png](img/gravel.png)
 
 **NOTE: This repo is a **work-in-progress**, and still has lots of work before it is useful.**
 
