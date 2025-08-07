@@ -1,6 +1,7 @@
 # car.py
 import math
 import numpy as np
+from .colors import CAR_BODY_COLOR, WHEEL_DEFAULT_COLOR, WIND_COLOR
 
 
 def _wheel_points(offset_pos, axle_dir, v1, v2, angle, radius, num):
@@ -40,7 +41,7 @@ def collect_car_vertices(car, car_up, car_dir, dt, wheel_spin_accum):
         (0, 1), (0, 2), (0, 4), (1, 3), (1, 5), (2, 3), (2, 6),
         (3, 7), (4, 5), (4, 6), (5, 7), (6, 7)
     ]
-    car_color = [252, 255, 255, 1.0]
+    car_color = list(CAR_BODY_COLOR)
     for a, b in edges:
         pa = world_corners[a]
         pb = world_corners[b]
@@ -58,7 +59,7 @@ def collect_car_vertices(car, car_up, car_dir, dt, wheel_spin_accum):
         # Color shocks from green (fully extended) to red (fully compressed)
         # to visualize suspension travel clearly.
         susp_color = [compression_ratio, 1 - compression_ratio, 0.0, 1.0]
-        tire_color = [wheel.slip_ratio, 0.0, 0.0, 1.0] if wheel.is_grounded else [0.5, 0.5, 0.5, 1.0]
+        tire_color = [wheel.slip_ratio, 0.0, 0.0, 1.0] if wheel.is_grounded else list(WHEEL_DEFAULT_COLOR)
 
         local_steer = wheel.steer_angle
         local_axle = np.array([math.cos(local_steer), 0, -math.sin(local_steer)])
@@ -114,7 +115,7 @@ def collect_car_vertices(car, car_up, car_dir, dt, wheel_spin_accum):
         line_length = min(drag_mag / 100, 5)
         rear_top_left = car.body.pos + car.body.rot.rotate(np.array([half_width, half_height + car.body_offset, -half_length]))
         rear_top_right = car.body.pos + car.body.rot.rotate(np.array([-half_width, half_height + car.body_offset, -half_length]))
-        wind_color = [200/255, 200/255, 255/255, 1.0]
+        wind_color = list(WIND_COLOR)
         for start_pos in [rear_top_left, rear_top_right]:
             end_pos = start_pos - car_dir * line_length
             main_vertices.extend(list(start_pos) + wind_color)

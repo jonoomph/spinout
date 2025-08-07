@@ -30,6 +30,7 @@ uniform float wetness;
 uniform float fog_density;
 uniform vec3  fog_color;
 uniform float noise_scale;  // >0 asphalt/gravel, <0 concrete
+uniform int terrain_mode;   // 0 none, 1 grass, 2 dirt/sand, 3 snow
 
 out vec4 fragColor;
 
@@ -63,12 +64,27 @@ void main() {
     float wetAmt = wetness * 0.3;
     vec3 base = color.rgb * (1.0 + wetAmt);
 
-    // world-space XZ noise on every surface
-    vec2 P = v_pos.xz * scale * 0.1;
-    float n = fbm(P) - 0.5;
-    // tweak amplitude so concrete gets a bit bolder
-    float amp = (noise_scale < 0.0) ? 0.35 : 0.25;
-    base *= 1.0 + n * amp;
+    // terrain textures
+    vec2 texP = v_pos.xz * 0.1;
+    if (terrain_mode == 1) {
+        float g = fbm(texP * 1.5);
+        base *= 0.8 + 0.4 * g;
+    } else if (terrain_mode == 2) {
+        float g = valueNoise(texP * 8.0);
+        base *= 0.9 + 0.1 * g;
+    } else if (terrain_mode == 3) {
+        float g = valueNoise(texP * 6.0);
+        base = base * (0.9 + 0.1 * g) + vec3(g * 0.2);
+    }
+
+    if (scale > 0.0) {
+        // world-space XZ noise for roads
+        vec2 P = v_pos.xz * scale * 0.1;
+        float n = fbm(P) - 0.5;
+        // tweak amplitude so concrete gets a bit bolder
+        float amp = (noise_scale < 0.0) ? 0.35 : 0.25;
+        base *= 1.0 + n * amp;
+    }
 
     // fog blend
     float f = exp(-dist * fog_density);
@@ -83,6 +99,7 @@ in vec3 in_normal;
 in vec4 in_color;
 uniform mat4 mvp;
 uniform vec3 light_dir;
+uniform vec3 light_color;
 uniform vec3 cam_pos;
 uniform float wetness;
 out vec4 color;
@@ -95,11 +112,12 @@ void main() {
     float diff = max(dot(norm, light), 0.0);
     float ambient = 0.2;
     vec3 base_col = in_color.rgb * (1.0 + wetness * 0.3);
-    vec3 base = base_col * (ambient + diff * (1.0 - ambient));
+    vec3 base = base_col * ambient + base_col * diff * light_color;
     vec3 view = normalize(cam_pos - in_vert);
     vec3 reflect_dir = reflect(-light, norm);
-    float spec = pow(max(dot(view, reflect_dir), 0.0), 32.0) * wetness * 8.0;
-    color = vec4(base + spec, in_color.a);
+    float spec = pow(max(dot(view, reflect_dir), 0.0), 16.0) * wetness * 0.5;
+    vec3 col = base + spec * light_color;
+    color = vec4(min(col, vec3(1.0)), in_color.a);
     dist = length(in_vert - cam_pos);
     v_pos = in_vert;
 }
@@ -114,6 +132,7 @@ in vec3  v_pos;
 uniform float fog_density;
 uniform vec3  fog_color;
 uniform float noise_scale;
+uniform int terrain_mode;
 
 out vec4 fragColor;
 
@@ -145,13 +164,27 @@ void main() {
     // take the lit color from the vertex stage
     vec3 litCol = color.rgb;
 
-    // apply the same fBm noise as unlit shader
+    // terrain textures
+    vec2 texP = v_pos.xz * 0.1;
+    if (terrain_mode == 1) {
+        float g = fbm(texP * 1.5);
+        litCol *= 0.8 + 0.4 * g;
+    } else if (terrain_mode == 2) {
+        float g = valueNoise(texP * 8.0);
+        litCol *= 0.9 + 0.1 * g;
+    } else if (terrain_mode == 3) {
+        float g = valueNoise(texP * 6.0);
+        litCol = litCol * (0.9 + 0.1 * g) + vec3(g * 0.2);
+    }
+
     float scale = abs(noise_scale);
-    vec2 P     = v_pos.xz * scale * 0.1;
-    float n    = fbm(P) - 0.5;
-    // give concrete a slightly stronger bumpiness
-    float amp  = (noise_scale < 0.0) ? 0.35 : 0.25;
-    litCol     *= 1.0 + n * amp;
+    if (scale > 0.0) {
+        vec2 P     = v_pos.xz * scale * 0.1;
+        float n    = fbm(P) - 0.5;
+        // give concrete a slightly stronger bumpiness
+        float amp  = (noise_scale < 0.0) ? 0.35 : 0.25;
+        litCol     *= 1.0 + n * amp;
+    }
 
     // fog
     float f = exp(-dist * fog_density);

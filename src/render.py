@@ -2,6 +2,14 @@
 import moderngl
 import pygame
 import numpy as np
+from .colors import (
+    FOG_DEFAULT_COLOR,
+    FOG_DUST_COLOR,
+    SKY_BOTTOM_COLOR,
+    SKY_HORIZON_COLOR,
+    SKY_TOP_COLOR,
+    SUN_LIGHT_COLOR,
+)
 
 class RenderContext:
     def __init__(self, width, height):
@@ -16,11 +24,13 @@ class RenderContext:
         self.ortho = np.eye(4, dtype='f4')  # Identity for NDC
         self.mode = 0  # 0=wireframe,1=solid,2=solid+sun
         self.light_dir = np.array([0.5, 1.0, 0.3], dtype='f4')
+        self.light_color = np.array(SUN_LIGHT_COLOR, dtype='f4')
         self.camera_pos = np.zeros(3, dtype='f4')
         self.fog_density = 0.0
-        self.fog_color = np.array([0.8, 0.8, 0.8], dtype='f4')
+        self.fog_color = np.array(FOG_DEFAULT_COLOR, dtype='f4')
         self.wetness = 0.0
         self.road_noise = 0.0
+        self.terrain_mode = 0
         hud_quad_data = np.array([
             0.0, 0.0, 0.0, 0.0,
             1.0, 0.0, 1.0, 0.0,
@@ -43,9 +53,9 @@ class RenderContext:
         self.car_model_tex = None
 
         # Gradient skybox: light gray ground -> white horizon band -> blue sky
-        bottom = [0.8, 0.8, 0.8, 1.0]
-        horizon = [1.0, 1.0, 1.0, 1.0]
-        sky = [135/255, 206/255, 235/255, 1.0]
+        bottom = list(SKY_BOTTOM_COLOR)
+        horizon = list(SKY_HORIZON_COLOR)
+        sky = list(SKY_TOP_COLOR)
         skybox_data = np.array([
             -1.0, -1.0, 0.0, *bottom,
             1.0, -1.0, 0.0, *bottom,
@@ -69,14 +79,22 @@ class RenderContext:
     def setup_weather(self, weather, terrain_type, road_type):
         self.wetness = 1.0 if weather == 'wet' else 0.0
         self.fog_density = 0.0
-        self.fog_color = np.array([0.8, 0.8, 0.8], dtype='f4')
+        self.fog_color = np.array(FOG_DEFAULT_COLOR, dtype='f4')
         if terrain_type == 'snow':
             self.fog_density = 0.08 if self.wetness > 0.0 else 0.02
         elif self.wetness > 0.0:
             self.fog_density = 0.03
         elif terrain_type in ('sand', 'gravel', 'dirt'):
             self.fog_density = 0.001
-            self.fog_color = np.array([0.8, 0.7, 0.5], dtype='f4')
+            self.fog_color = np.array(FOG_DUST_COLOR, dtype='f4')
+
+        terrain_map = {
+            'grass': 1,
+            'dirt': 2,
+            'sand': 2,
+            'snow': 3,
+        }
+        self.terrain_mode = terrain_map.get(terrain_type, 0)
 
         # subtle surface texture for roads
         noise_map = {
@@ -107,17 +125,24 @@ class RenderContext:
             prog['fog_color'].value = tuple(self.fog_color)
         if 'wetness' in prog:
             prog['wetness'].value = self.wetness
+        if 'light_color' in prog:
+            prog['light_color'].value = tuple(self.light_color)
 
-    def render_terrain(self, terrain_vao, mvp, noise_scale=0.0):
+    def render_terrain(self, terrain_vao, mvp, noise_scale=0.0, terrain_mode=None):
         self.ctx.line_width = 1.0
         prog = terrain_vao.program
         prog['mvp'].write(mvp.T.tobytes())
         self._apply_common_uniforms(prog)
         if 'noise_scale' in prog:
             prog['noise_scale'].value = noise_scale
+        if 'terrain_mode' in prog:
+            prog['terrain_mode'].value = self.terrain_mode if terrain_mode is None else terrain_mode
         if 'light_dir' in prog:
             prog['light_dir'].value = tuple(self.light_dir)
         terrain_vao.render(moderngl.TRIANGLES)
+
+    def cycle_terrain_mode(self):
+        self.terrain_mode = (self.terrain_mode + 1) % 4
 
     def render_signs(self, vao, mvp):
         """Render simple colored billboards such as sign posts."""
@@ -231,6 +256,8 @@ class RenderContext:
             self.prog['wetness'].value = 0.0
         if 'noise_scale' in self.prog:
             self.prog['noise_scale'].value = 0.0
+        if 'terrain_mode' in self.prog:
+            self.prog['terrain_mode'].value = 0
         self.sky_vao.render(moderngl.TRIANGLES)
         self.ctx.enable(moderngl.DEPTH_TEST)
         self.ctx.wireframe = was_wireframe

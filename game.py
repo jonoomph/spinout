@@ -17,21 +17,31 @@ from src.utils import compute_mvp
 from src.terrain import build_terrain_triangles
 from src.car import collect_car_vertices
 from src.bbmodel import load_bbmodel, collect_car_model_vertices
+from src.colors import (
+    ROAD_ASPHALT_COLOR,
+    ROAD_CONCRETE_COLOR,
+    ROAD_GRAVEL_COLOR,
+    TERRAIN_GRASS_COLOR,
+    TERRAIN_SAND_COLOR,
+    TERRAIN_SNOW_COLOR,
+    TERRAIN_DIRT_COLOR,
+)
 
 # Screen dimensions and constants
 WIDTH, HEIGHT = 1854, 1168
 WEATHER_MODIFIERS = {"dry": 1.0, "wet": 0.7}
 
 ROAD_TYPES = {
-    "asphalt": {"color": [0.3, 0.3, 0.3, 1.0], "friction": 1.0},
-    "concrete": {"color": [0.7, 0.7, 0.7, 1.0], "friction": 0.95},
-    "gravel": {"color": [0.36, 0.25, 0.2, 1.0], "friction": 0.8},
+    "asphalt": {"color": ROAD_ASPHALT_COLOR, "friction": 1.0},
+    "concrete": {"color": ROAD_CONCRETE_COLOR, "friction": 0.95},
+    "gravel": {"color": ROAD_GRAVEL_COLOR, "friction": 0.8},
 }
 
 TERRAIN_TYPES = {
-    "grass": {"color": [110 / 255, 188 / 255, 56 / 255, 1.0], "friction": 0.7},
-    "sand": {"color": [0.76, 0.70, 0.50, 1.0], "friction": 0.6},
-    "snow": {"color": [1.0, 1.0, 1.0, 1.0], "friction": 0.5},
+    "grass": {"color": TERRAIN_GRASS_COLOR, "friction": 0.7},
+    "sand": {"color": TERRAIN_SAND_COLOR, "friction": 0.6},
+    "dirt": {"color": TERRAIN_DIRT_COLOR, "friction": 0.6},
+    "snow": {"color": TERRAIN_SNOW_COLOR, "friction": 0.5},
 }
 
 
@@ -60,7 +70,7 @@ show_loading(0.2, "Generating terrain...", screen, loading_font)
 rng = np.random.default_rng()
 weather = rng.choice(["dry", "wet"], p=[0.7, 0.3])
 road_type = rng.choice(list(ROAD_TYPES), p=[0.7, 0.2, 0.1])
-terrain_type = rng.choice(list(TERRAIN_TYPES), p=[0.7, 0.15, 0.15])
+terrain_type = rng.choice(list(TERRAIN_TYPES), p=[0.55, 0.15, 0.15, 0.15])
 weather_mod = WEATHER_MODIFIERS[weather]
 
 surface_info = f"{weather.title()} {road_type.title()} | {terrain_type.title()}"
@@ -185,6 +195,10 @@ while running:
                 camera_mode = (camera_mode + 1) % 3
             elif e.key == K_b:
                 use_bbmodel = not use_bbmodel
+            elif e.key == K_v:
+                render_ctx.wetness = 0.0 if render_ctx.wetness > 0.0 else 1.0
+            elif e.key == K_t:
+                render_ctx.cycle_terrain_mode()
 
     # controls & car switching
     s_i, a_i, b_i, new = get_controls(pygame.key.get_pressed())
@@ -235,7 +249,7 @@ while running:
     t_vao = terrain_vao_lit if mode == 2 else terrain_vao
     r_vao = road_vao_lit if mode == 2 else road_vao
     render_ctx.render_terrain(t_vao, mvp)
-    render_ctx.render_terrain(r_vao, mvp, render_ctx.road_noise)
+    render_ctx.render_terrain(r_vao, mvp, render_ctx.road_noise, terrain_mode=0)
     if sign_post_vao: render_ctx.render_signs(sign_post_vao, mvp)
     for vao, tex in sign_billboards:
         render_ctx.render_billboard(vao, tex, mvp)

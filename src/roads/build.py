@@ -239,8 +239,9 @@ def build_road_vertices(
 
     verts: list[float] = []
     def emit_quad(a, b, c, d, col):
-        verts.extend(a + col); verts.extend(b + col); verts.extend(c + col)
-        verts.extend(c + col); verts.extend(b + col); verts.extend(d + col)
+        col_list = list(col)
+        verts.extend(a + col_list); verts.extend(b + col_list); verts.extend(c + col_list)
+        verts.extend(c + col_list); verts.extend(b + col_list); verts.extend(d + col_list)
 
     # connect deck
     for i in range(len(rings) - 1):
@@ -295,20 +296,6 @@ def build_road_vertices(
             if prev_pair is not None:
                 emit_quad(prev_pair[0], prev_pair[1], this_pair[0], this_pair[1], green)
             prev_pair = this_pair
-
-    return np.array(verts, dtype="f4")
-
-
-    # emit quads by connecting ring[i] to ring[i+1]
-    verts: list[float] = []
-    def emit_quad(a, b, c, d, col):
-        verts.extend(a + col); verts.extend(b + col); verts.extend(c + col)
-        verts.extend(c + col); verts.extend(b + col); verts.extend(d + col)
-
-    for i in range(len(rings) - 1):
-        r0, r1 = rings[i], rings[i + 1]
-        for j in range(len(r0) - 1):
-            emit_quad(r0[j], r0[j + 1], r1[j], r1[j + 1], road_color)
 
     return np.array(verts, dtype="f4")
 

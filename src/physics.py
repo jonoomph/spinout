@@ -2,6 +2,7 @@
 import math
 import numpy as np
 from scipy.ndimage import gaussian_filter
+from .colors import TERRAIN_DEFAULT_COLOR
 
 # Maximum discrete input steps shared with ``controls``.
 STEER_MAX = 128
@@ -208,7 +209,7 @@ class Terrain:
         noise = np.random.uniform(-height_scale, height_scale, (res, res))
         self.heights = gaussian_filter(noise, sigma=sigma)
         self.terrain_type = terrain_type
-        self.color = color or [34 / 255, 139 / 255, 34 / 255, 1.0]
+        self.color = color or list(TERRAIN_DEFAULT_COLOR)
         self.base_friction = friction
         self.surface_friction = np.full((res, res), friction, dtype=float)
         # Separate map for road friction so terrain choice does not affect roads

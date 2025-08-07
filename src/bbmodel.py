@@ -4,6 +4,7 @@ from io import BytesIO
 from typing import Dict, List
 import numpy as np
 from PIL import Image
+from .colors import WIRE_COLOR
 
 
 def load_bbmodel(path: str) -> Dict:
@@ -144,7 +145,7 @@ def collect_car_model_vertices(car, model_data: Dict):
         world = car.body.pos + car.body.rot.rotate(scaled)
         tri_verts.extend(world.tolist() + uv.tolist())
 
-    edge_color = [1.0, 1.0, 1.0, 1.0]
+    edge_color = list(WIRE_COLOR)
     edge_verts: List[float] = []
     for p in base_edges:
         scaled = p * scale + offset
