@@ -4,5 +4,6 @@ scipy
 moderngl
 pygame>=2.5.2
 pytest
+pytest-xdist
 matplotlib
 pillow
