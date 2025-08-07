@@ -55,6 +55,20 @@ pip install -r requirements.txt
 python game.py
 ```
 
+## Dependencies
+
+| Package | Used for |
+| ------- | -------- |
+| `numpy` | Vector math for physics, terrain generation, and utilities |
+| `noise` | Perlin noise to randomize roads and terrain |
+| `scipy` | Gaussian filters and interpolation for smooth surfaces |
+| `moderngl` | OpenGL context and rendering |
+| `pygame` | Window management, input handling, and HUD surfaces |
+| `matplotlib` | Optional debug plots for road planning |
+| `pillow` | Loading textures for models and signs |
+| `pytest` | Test suite execution |
+| `pytest-xdist` | Parallelizing pytest runs |
+
 ## Inspiration
 
 This project is inspired by the Comma.ai [controls challenge](https://github.com/jonoomph/controls_challenge), 

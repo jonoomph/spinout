@@ -1,9 +1,9 @@
-numpy
-noise
-scipy
-moderngl
-pygame>=2.5.2
-pytest
-pytest-xdist
-matplotlib
-pillow
+numpy          # physics arrays, terrain math
+noise          # Perlin noise for road gen
+scipy          # smoothing & interpolation
+moderngl       # OpenGL rendering
+pygame>=2.5.2  # windowing, input, HUD
+pytest         # test runner
+pytest-xdist   # parallel tests
+matplotlib     # debug road plots
+pillow         # image loading for models
