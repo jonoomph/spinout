@@ -82,7 +82,14 @@ def simulate(car, accel=True):
 
 def run_test(car_data, visualize=VISUALIZE):
     """Run acceleration and braking tests on a flat, sufficiently large terrain."""
-    terrain = Terrain(size=800, res=200, height_scale=0, sigma=0)
+    terrain = Terrain(
+        size=800,
+        res=200,
+        height_scale=0,
+        sigma=0,
+        terrain_type="asphalt",
+        color=[0.2, 0.2, 0.2, 1.0],
+    )
     terrain.heights[:] = 0
 
     car = Car(terrain, car_data)
@@ -123,7 +130,7 @@ def run_test_visual(car, terrain, accel_expected, brake_expected):
 
     from src.car import collect_car_vertices
     from src.render import RenderContext
-    from src.terrain import build_terrain_vertices
+    from src.terrain import build_terrain_triangles
     from src.utils import compute_mvp
 
     pygame.init()
@@ -131,7 +138,10 @@ def run_test_visual(car, terrain, accel_expected, brake_expected):
     pygame.display.set_mode((width, height), pygame.OPENGL | pygame.DOUBLEBUF)
     clock = pygame.time.Clock()
     render_ctx = RenderContext(width, height)
-    t_vbo = render_ctx.ctx.buffer(build_terrain_vertices(terrain).tobytes())
+    render_ctx.set_mode(1)  # solid terrain; road noise shows motion
+    render_ctx.setup_weather('dry', terrain.terrain_type, 'asphalt')
+    t_basic, _ = build_terrain_triangles(terrain)
+    t_vbo = render_ctx.ctx.buffer(t_basic.tobytes())
     t_vao = render_ctx.ctx.vertex_array(render_ctx.prog, t_vbo, "in_vert", "in_color")
     wheel_spin = [0.0] * 4
     substeps = 5
@@ -153,8 +163,9 @@ def run_test_visual(car, terrain, accel_expected, brake_expected):
         cam_up = np.cross(cam_right, cam_fwd)
         cam_up /= np.linalg.norm(cam_up)
         mvp = compute_mvp(width, height, cam_pos, cam_right, cam_fwd, cam_up)
+        render_ctx.set_camera(cam_pos)
         render_ctx.clear()
-        render_ctx.render_terrain(t_vao, mvp)
+        render_ctx.render_terrain(t_vao, mvp, render_ctx.road_noise)
         verts = collect_car_vertices(car, car_up, car_dir, dt, wheel_spin)
         render_ctx.render_car(verts, mvp)
         hud_surf.fill((0, 0, 0, 0))

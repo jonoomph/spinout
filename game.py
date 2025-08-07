@@ -86,6 +86,7 @@ screen = pygame.display.set_mode((WIDTH, HEIGHT), pygame.OPENGL | pygame.DOUBLEB
 pygame.display.set_caption("Spinout")
 clock = pygame.time.Clock()
 render_ctx = RenderContext(WIDTH, HEIGHT)
+render_ctx.setup_weather(weather, terrain_type, road_type)
 
 # Load Blockbench car model and upload its texture
 car_model_data = load_bbmodel("data/car.bbmodel")
@@ -221,6 +222,7 @@ while running:
         right /= np.linalg.norm(right)
         up_vec = np.cross(right, forward)
         up_vec /= np.linalg.norm(up_vec)
+    render_ctx.set_camera(camera_pos)
     mvp = compute_mvp(WIDTH, HEIGHT,
                       camera_pos,
                       right,
@@ -233,7 +235,7 @@ while running:
     t_vao = terrain_vao_lit if mode == 2 else terrain_vao
     r_vao = road_vao_lit if mode == 2 else road_vao
     render_ctx.render_terrain(t_vao, mvp)
-    render_ctx.render_terrain(r_vao, mvp)
+    render_ctx.render_terrain(r_vao, mvp, render_ctx.road_noise)
     if sign_post_vao: render_ctx.render_signs(sign_post_vao, mvp)
     for vao, tex in sign_billboards:
         render_ctx.render_billboard(vao, tex, mvp)
@@ -243,6 +245,7 @@ while running:
         render_ctx.render_car_model(model_verts, mvp)
     else:
         render_ctx.render_car(car_lines, mvp)
+    render_ctx.render_weather(mvp, dt)
 
     # HUD
     spd = np.linalg.norm(car.body.vel) * 2.23694

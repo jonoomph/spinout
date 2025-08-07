@@ -6,7 +6,7 @@ import numpy as np
 class RenderContext:
     def __init__(self, width, height):
         self.ctx = moderngl.create_context()
-        self.ctx.enable(moderngl.DEPTH_TEST | moderngl.BLEND)
+        self.ctx.enable(moderngl.DEPTH_TEST | moderngl.BLEND | moderngl.PROGRAM_POINT_SIZE)
         self.ctx.blend_func = moderngl.SRC_ALPHA, moderngl.ONE_MINUS_SRC_ALPHA
         self.ctx.blend_equation = moderngl.FUNC_ADD
         self.width = width
@@ -16,6 +16,11 @@ class RenderContext:
         self.ortho = np.eye(4, dtype='f4')  # Identity for NDC
         self.mode = 0  # 0=wireframe,1=solid,2=solid+sun
         self.light_dir = np.array([0.5, 1.0, 0.3], dtype='f4')
+        self.camera_pos = np.zeros(3, dtype='f4')
+        self.fog_density = 0.0
+        self.fog_color = np.array([0.8, 0.8, 0.8], dtype='f4')
+        self.wetness = 0.0
+        self.road_noise = 0.0
         hud_quad_data = np.array([
             0.0, 0.0, 0.0, 0.0,
             1.0, 0.0, 1.0, 0.0,
@@ -58,6 +63,32 @@ class RenderContext:
         self.sky_vbo = self.ctx.buffer(skybox_data.tobytes())
         self.sky_vao = self.ctx.vertex_array(self.prog, self.sky_vbo, 'in_vert', 'in_color')
 
+    def set_camera(self, pos):
+        self.camera_pos = np.array(pos, dtype='f4')
+
+    def setup_weather(self, weather, terrain_type, road_type):
+        self.wetness = 1.0 if weather == 'wet' else 0.0
+        self.fog_density = 0.0
+        self.fog_color = np.array([0.8, 0.8, 0.8], dtype='f4')
+        if terrain_type == 'snow':
+            self.fog_density = 0.08 if self.wetness > 0.0 else 0.02
+        elif self.wetness > 0.0:
+            self.fog_density = 0.03
+        elif terrain_type in ('sand', 'gravel', 'dirt'):
+            self.fog_density = 0.001
+            self.fog_color = np.array([0.8, 0.7, 0.5], dtype='f4')
+
+        # subtle surface texture for roads
+        noise_map = {
+            'asphalt': 2.5,   # larger scale noise for visible motion
+            'concrete': 1.5 , # negative selects groove pattern with wide spacing
+            'gravel': 3.5,    # coarse noise for gravel
+        }
+        self.road_noise = noise_map.get(road_type, 0.0)
+
+    def render_weather(self, mvp, dt):
+        pass
+
     def set_mode(self, mode):
         self.mode = mode
         self.ctx.wireframe = mode == 0
@@ -67,10 +98,23 @@ class RenderContext:
         self.ctx.clear(0.0, 0.0, 0.0, 1.0, depth=1.0)
         self.render_skybox()
 
-    def render_terrain(self, terrain_vao, mvp):
+    def _apply_common_uniforms(self, prog):
+        if 'cam_pos' in prog:
+            prog['cam_pos'].value = tuple(self.camera_pos)
+        if 'fog_density' in prog:
+            prog['fog_density'].value = self.fog_density
+        if 'fog_color' in prog:
+            prog['fog_color'].value = tuple(self.fog_color)
+        if 'wetness' in prog:
+            prog['wetness'].value = self.wetness
+
+    def render_terrain(self, terrain_vao, mvp, noise_scale=0.0):
         self.ctx.line_width = 1.0
         prog = terrain_vao.program
         prog['mvp'].write(mvp.T.tobytes())
+        self._apply_common_uniforms(prog)
+        if 'noise_scale' in prog:
+            prog['noise_scale'].value = noise_scale
         if 'light_dir' in prog:
             prog['light_dir'].value = tuple(self.light_dir)
         terrain_vao.render(moderngl.TRIANGLES)
@@ -81,6 +125,7 @@ class RenderContext:
         self.ctx.wireframe = False
         prog = vao.program
         prog['mvp'].write(mvp.T.tobytes())
+        self._apply_common_uniforms(prog)
         vao.render(moderngl.TRIANGLES)
         self.ctx.wireframe = was_wireframe
 
@@ -90,6 +135,7 @@ class RenderContext:
         self.ctx.wireframe = False
         prog = vao.program
         prog['mvp'].write(mvp.T.tobytes())
+        self._apply_common_uniforms(prog)
         tex.use(0)
         prog['tex'] = 0
         vao.render(moderngl.TRIANGLES)
@@ -98,6 +144,7 @@ class RenderContext:
     def render_car(self, vertices, mvp):
         main_vertices, shock_vertices = vertices
         self.prog['mvp'].write(mvp.T.tobytes())
+        self._apply_common_uniforms(self.prog)
         if main_vertices:
             main_data = np.array(main_vertices, dtype='f4').tobytes()
             if self.main_vbo is None or len(main_data) > self.main_vbo.size:
@@ -141,6 +188,7 @@ class RenderContext:
             else:
                 self.model_edge_vbo.write(data, 0)
             self.prog['mvp'].write(mvp.T.tobytes())
+            self._apply_common_uniforms(self.prog)
             self.ctx.line_width = 1.0
             self.model_edge_vao.render(moderngl.LINES)
             return
@@ -161,6 +209,7 @@ class RenderContext:
             self.model_vbo.write(data, 0)
 
         self.prog_tex['mvp'].write(mvp.T.tobytes())
+        self._apply_common_uniforms(self.prog_tex)
         if self.car_model_tex:
             self.car_model_tex.use(0)
             self.prog_tex['tex'] = 0
@@ -172,6 +221,16 @@ class RenderContext:
         self.ctx.wireframe = False
         self.ctx.disable(moderngl.DEPTH_TEST)
         self.prog['mvp'].write(self.ortho.tobytes())
+        if 'cam_pos' in self.prog:
+            self.prog['cam_pos'].value = (0.0, 0.0, 0.0)
+        if 'fog_density' in self.prog:
+            self.prog['fog_density'].value = 0.0
+        if 'fog_color' in self.prog:
+            self.prog['fog_color'].value = (0.8, 0.8, 0.8)
+        if 'wetness' in self.prog:
+            self.prog['wetness'].value = 0.0
+        if 'noise_scale' in self.prog:
+            self.prog['noise_scale'].value = 0.0
         self.sky_vao.render(moderngl.TRIANGLES)
         self.ctx.enable(moderngl.DEPTH_TEST)
         self.ctx.wireframe = was_wireframe
