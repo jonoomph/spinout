@@ -80,10 +80,8 @@ class RenderContext:
         self.wetness = 1.0 if weather == 'wet' else 0.0
         self.fog_density = 0.0
         self.fog_color = np.array(FOG_DEFAULT_COLOR, dtype='f4')
-        if terrain_type == 'snow':
-            self.fog_density = 0.08 if self.wetness > 0.0 else 0.02
-        elif self.wetness > 0.0:
-            self.fog_density = 0.03
+        if self.wetness > 0.0:
+            self.fog_density = 0.015
         elif terrain_type in ('sand', 'gravel', 'dirt'):
             self.fog_density = 0.001
             self.fog_color = np.array(FOG_DUST_COLOR, dtype='f4')

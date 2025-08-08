@@ -17,7 +17,7 @@ TERRAIN_SNOW_COLOR = (1.0, 1.0, 1.0, 1.0)
 
 # Road surface colors
 ROAD_ASPHALT_COLOR = (0.3, 0.3, 0.3, 1.0)
-ROAD_CONCRETE_COLOR = (0.55, 0.55, 0.55, 1.0)
+ROAD_CONCRETE_COLOR = (0.5, 0.5, 0.5, 1.0)
 ROAD_GRAVEL_COLOR = (0.5, 0.5, 0.5, 1.0)
 
 # Fog colors
