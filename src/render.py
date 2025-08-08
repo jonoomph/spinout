@@ -2,6 +2,7 @@
 import moderngl
 import pygame
 import numpy as np
+import random
 from .colors import (
     FOG_DEFAULT_COLOR,
     FOG_DUST_COLOR,
@@ -21,6 +22,8 @@ class RenderContext:
         self.height = height
         from src.shaders import create_shaders
         self.prog, self.prog2d, self.prog_lit, self.prog_tex = create_shaders(self.ctx)
+        if 'point_size' in self.prog:
+            self.prog['point_size'].value = 1.0
         self.ortho = np.eye(4, dtype='f4')  # Identity for NDC
         self.mode = 1  # 0=wireframe,1=textured
         self.light_dir = np.array([0.5, 1.0, 0.3], dtype='f4')
@@ -52,11 +55,59 @@ class RenderContext:
         self.model_edge_vao = None
         self.car_model_tex = None
 
-        # Gradient skybox: light gray ground -> white horizon band -> blue sky
-        bottom = list(SKY_BOTTOM_COLOR)
-        horizon = list(SKY_HORIZON_COLOR)
-        sky = list(SKY_TOP_COLOR)
-        skybox_data = np.array([
+        # sky + stars geometry buffers generated per session
+        self.sky_vbo = None
+        self.sky_vao = None
+        self.stars_vbo = None
+        self.stars_vao = None
+        self._generate_sky()
+
+    def _generate_sky(self):
+        """Generate a random sky gradient and optional stars."""
+        # choose a random time of day [0,1) where 0/1 midnight, 0.5 noon
+        t = random.random()
+        sun_height = max(0.0, np.sin(t * 2 * np.pi))  # 0 night, 1 noon
+        night_factor = 1.0 - sun_height
+
+        # base colors for day and night
+        day_top = np.array(SKY_TOP_COLOR)
+        night_top = np.array([10/255, 10/255, 40/255, 1.0])
+
+        # compute top color by blending
+        sky_top = day_top * sun_height + night_top * night_factor
+
+        # horizon color transitions: white during day, warm at dusk/dawn, dark at night
+        warm = np.array([253/255, 94/255, 83/255, 1.0])
+        dusk_dawn = np.exp(-((t - 0.25) / 0.07) ** 2) + np.exp(-((t - 0.75) / 0.07) ** 2)
+        horizon_day = np.array(SKY_HORIZON_COLOR)
+        horizon_night = night_top * 0.6
+        horizon = (
+            horizon_day * sun_height
+            + horizon_night * night_factor
+            + warm * dusk_dawn
+        )
+
+        bottom = (
+            np.array(SKY_BOTTOM_COLOR) * sun_height
+            + np.array([0.05, 0.05, 0.05, 1.0]) * night_factor
+        )
+
+        # store colors for later lighting/fog calculations
+        self.base_fog_color = horizon[:3]
+        day_light = np.array(SUN_LIGHT_COLOR)
+        night_light = np.array([0.2, 0.2, 0.35])
+        warm_light = np.array([1.0, 0.6, 0.4])
+        self.light_color = (
+            day_light * sun_height
+            + night_light * night_factor
+            + warm_light * dusk_dawn
+        ).astype("f4")
+
+        # initialize fog color to match sky before weather adjustments
+        self.fog_color = np.array(self.base_fog_color, dtype="f4")
+
+        # build skybox vertices
+        data = np.array([
             -1.0, -1.0, 0.0, *bottom,
             1.0, -1.0, 0.0, *bottom,
             -1.0, 0.0, 0.0, *horizon,
@@ -65,13 +116,33 @@ class RenderContext:
             1.0, 0.0, 0.0, *horizon,
             -1.0, 0.0, 0.0, *horizon,
             1.0, 0.0, 0.0, *horizon,
-            -1.0, 1.0, 0.0, *sky,
-            -1.0, 1.0, 0.0, *sky,
+            -1.0, 1.0, 0.0, *sky_top,
+            -1.0, 1.0, 0.0, *sky_top,
             1.0, 0.0, 0.0, *horizon,
-            1.0, 1.0, 0.0, *sky,
-        ], dtype='f4')
-        self.sky_vbo = self.ctx.buffer(skybox_data.tobytes())
-        self.sky_vao = self.ctx.vertex_array(self.prog, self.sky_vbo, 'in_vert', 'in_color')
+            1.0, 1.0, 0.0, *sky_top,
+        ], dtype="f4")
+        if self.sky_vbo is not None:
+            self.sky_vbo.release()
+        self.sky_vbo = self.ctx.buffer(data.tobytes())
+        self.sky_vao = self.ctx.vertex_array(self.prog, self.sky_vbo, "in_vert", "in_color")
+
+        # generate stars
+        star_count = int(200 * night_factor + 50 * dusk_dawn)
+        if star_count > 0:
+            xs = np.random.uniform(-1.0, 1.0, star_count)
+            ys = np.random.uniform(0.0, 1.0, star_count)
+            colors = np.ones((star_count, 4), dtype="f4")
+            alpha = (night_factor ** 2) * 1.0
+            colors[:, 3] = alpha
+            verts = np.column_stack([xs, ys, np.zeros(star_count), colors.reshape(star_count, 4)])
+            buf = verts.astype("f4").ravel()
+            if self.stars_vbo is not None:
+                self.stars_vbo.release()
+            self.stars_vbo = self.ctx.buffer(buf.tobytes())
+            self.stars_vao = self.ctx.vertex_array(self.prog, self.stars_vbo, "in_vert", "in_color")
+        else:
+            self.stars_vbo = None
+            self.stars_vao = None
 
     def set_camera(self, pos):
         self.camera_pos = np.array(pos, dtype='f4')
@@ -79,12 +150,16 @@ class RenderContext:
     def setup_weather(self, weather, terrain_type, road_type):
         self.wetness = 1.0 if weather == 'wet' else 0.0
         self.fog_density = 0.0
-        self.fog_color = np.array(FOG_DEFAULT_COLOR, dtype='f4')
+        # start fog color from the sky's horizon tone
+        self.fog_color = np.array(getattr(self, "base_fog_color", FOG_DEFAULT_COLOR), dtype="f4")
         if self.wetness > 0.0:
             self.fog_density = 0.015
-        elif terrain_type in ('sand', 'gravel', 'dirt'):
+        elif terrain_type in ("sand", "gravel", "dirt"):
             self.fog_density = 0.001
-            self.fog_color = np.array(FOG_DUST_COLOR, dtype='f4')
+            # dusty terrain tints the fog toward a sandy hue
+            self.fog_color = (
+                0.5 * self.fog_color + 0.5 * np.array(FOG_DUST_COLOR, dtype="f4")
+            )
 
         terrain_map = {
             'grass': 1,
@@ -244,12 +319,11 @@ class RenderContext:
         self.ctx.wireframe = False
         self.ctx.disable(moderngl.DEPTH_TEST)
         self.prog['mvp'].write(self.ortho.tobytes())
+        # apply fog and lighting so the skybox matches the scene
+        self._apply_common_uniforms(self.prog)
         if 'cam_pos' in self.prog:
-            self.prog['cam_pos'].value = (0.0, 0.0, 0.0)
-        if 'fog_density' in self.prog:
-            self.prog['fog_density'].value = 0.0
-        if 'fog_color' in self.prog:
-            self.prog['fog_color'].value = (0.8, 0.8, 0.8)
+            # push the sky back a bit so exponential fog can affect it
+            self.prog['cam_pos'].value = (0.0, 0.0, -100.0)
         if 'wetness' in self.prog:
             self.prog['wetness'].value = 0.0
         if 'noise_scale' in self.prog:
@@ -257,6 +331,12 @@ class RenderContext:
         if 'terrain_mode' in self.prog:
             self.prog['terrain_mode'].value = 0
         self.sky_vao.render(moderngl.TRIANGLES)
+        if self.stars_vao is not None:
+            if 'point_size' in self.prog:
+                self.prog['point_size'].value = 2.0
+            self.stars_vao.render(moderngl.POINTS)
+            if 'point_size' in self.prog:
+                self.prog['point_size'].value = 1.0
         self.ctx.enable(moderngl.DEPTH_TEST)
         self.ctx.wireframe = was_wireframe
 

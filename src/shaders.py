@@ -5,12 +5,14 @@ in vec3  in_vert;
 in vec4  in_color;
 uniform mat4 mvp;
 uniform vec3 cam_pos;
+uniform float point_size;
 out vec4  color;
 out float dist;
 out vec3  v_pos;
 
 void main() {
     gl_Position = mvp * vec4(in_vert, 1.0);
+    gl_PointSize = point_size;
     color      = in_color;
     dist       = length(in_vert - cam_pos);
     v_pos      = in_vert;
