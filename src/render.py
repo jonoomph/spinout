@@ -63,118 +63,182 @@ class RenderContext:
         self._generate_sky()
 
     def _generate_sky(self):
-        """Generate a random sky gradient and optional stars."""
-        # choose a random time of day [0,1) where 0/1 midnight, 0.5 noon
-        t = random.random()
-        sun_height = max(0.0, np.sin(t * 2 * np.pi))  # 0 night, 1 noon
-        night_factor = 1.0 - sun_height
+        """
+        Daylight & twilight only (no full night).
+        Rich, realistic gradients + faint twilight stars.
+        Exports:
+          - self.base_fog_color (horizon RGB)
+          - self.sky_brightness (0..1 approx)
+          - self.sky_vao / self.stars_vao
+        """
+        rng = np.random.default_rng()
 
-        # base colors for day and night
-        day_top = np.array(SKY_TOP_COLOR)
-        night_top = np.array([10/255, 10/255, 40/255, 1.0])
+        # ---------- choose time bucket (no deep night) ----------
+        # centers near sunrise, morning, noon, afternoon, evening, sunset
+        buckets = np.array([0.22, 0.33, 0.50, 0.60, 0.68, 0.78], dtype="f4")
+        stds = np.array([0.015, 0.035, 0.030, 0.035, 0.030, 0.015], dtype="f4")
+        weights = np.array([1.0, 1.1, 1.4, 1.1, 1.0, 1.0], dtype="f4");
+        weights /= weights.sum()
+        i = int(rng.choice(len(buckets), p=weights))
+        t = float(np.clip(rng.normal(buckets[i], stds[i]), 0.12, 0.88))  # [0,1), 0.25≈sunrise, 0.75≈sunset
 
-        # compute top color by blending
-        sky_top = day_top * sun_height + night_top * night_factor
+        # atmosphere knobs (kept conservative so we don’t go gray/flat)
+        overcast = float(np.clip(rng.normal(0.30, 0.18), 0.0, 0.8))  # 0 clear → 0.8 quite cloudy
+        turbidity = float(np.clip(rng.normal(2.0, 0.5), 1.2, 3.5))  # higher = hazier/whiter horizon
 
-        # horizon color transitions: white during day, warm at dusk/dawn, dark at night
-        warm = np.array([253/255, 94/255, 83/255, 1.0])
-        dusk_dawn = np.exp(-((t - 0.25) / 0.07) ** 2) + np.exp(-((t - 0.75) / 0.07) ** 2)
-        horizon_day = np.array(SKY_HORIZON_COLOR)
-        horizon_night = night_top * 0.6
-        horizon = (
-            horizon_day * sun_height
-            + horizon_night * night_factor
-            + warm * dusk_dawn
-        )
+        # twilight strength around 0.25 / 0.75 (dawn/sunset)
+        tw = float(np.exp(-((t - 0.25) / 0.045) ** 2) + np.exp(-((t - 0.75) / 0.045) ** 2))
+        tw *= (1.0 - overcast)
+        tw = float(np.clip(tw, 0.0, 1.0))
 
-        bottom = (
-            np.array(SKY_BOTTOM_COLOR) * sun_height
-            + np.array([0.05, 0.05, 0.05, 1.0]) * night_factor
-        )
+        # approximate “day factor” from solar elevation (no night clamp)
+        sun_elev = np.sin(t * 2.0 * np.pi)
+        day_fac = float(np.clip(sun_elev, 0.25, 1.0))  # never dim like night
 
-        # store colors for later lighting/fog calculations
-        self.base_fog_color = horizon[:3]
-        day_light = np.array(SUN_LIGHT_COLOR)
-        night_light = np.array([0.2, 0.2, 0.35])
-        warm_light = np.array([1.0, 0.6, 0.4])
-        self.light_color = (
-            day_light * sun_height
-            + night_light * night_factor
-            + warm_light * dusk_dawn
-        ).astype("f4")
+        # ---------- base clear colors (linear-ish RGB) ----------
+        # Zenith blue strengthens with day, horizon is warm at twilight, cool otherwise.
+        top_clear = np.array([0.10, 0.30 + 0.30 * day_fac, 0.70 + 0.25 * day_fac, 1.0], dtype="f4")
+        horizon_cool = np.array([0.70, 0.86, 1.00, 1.0], dtype="f4")
+        horizon_warm = np.array([1.00, 0.58, 0.36, 1.0], dtype="f4")
+        bottom_clear = np.array([0.86, 0.93, 1.00, 1.0], dtype="f4")  # light ground-scatter
 
-        # initialize fog color to match sky before weather adjustments
-        self.fog_color = np.array(self.base_fog_color, dtype="f4")
+        # Blend warm/cool horizon by twilight
+        horizon = horizon_cool * (1.0 - 0.85 * tw) + horizon_warm * (0.85 * tw)
+        top = top_clear.copy()
+        bottom = bottom_clear.copy()
 
-        # build skybox vertices
-        data = np.array([
-            -1.0, -1.0, 0.0, *bottom,
-            1.0, -1.0, 0.0, *bottom,
-            -1.0, 0.0, 0.0, *horizon,
-            -1.0, 0.0, 0.0, *horizon,
-            1.0, -1.0, 0.0, *bottom,
-            1.0, 0.0, 0.0, *horizon,
-            -1.0, 0.0, 0.0, *horizon,
-            1.0, 0.0, 0.0, *horizon,
-            -1.0, 1.0, 0.0, *sky_top,
-            -1.0, 1.0, 0.0, *sky_top,
-            1.0, 0.0, 0.0, *horizon,
-            1.0, 1.0, 0.0, *sky_top,
-        ], dtype="f4")
-        if self.sky_vbo is not None:
-            self.sky_vbo.release()
+        # ---------- overcast/turbidity ----------
+        oc_top = np.array([0.60, 0.64, 0.69, 1.0], dtype="f4")
+        oc_horizon = np.array([0.72, 0.75, 0.78, 1.0], dtype="f4")
+        oc_bottom = np.array([0.76, 0.78, 0.80, 1.0], dtype="f4")
+
+        top = top * (1.0 - overcast) + oc_top * overcast
+        horizon = horizon * (1.0 - overcast) + oc_horizon * overcast
+        bottom = bottom * (1.0 - overcast) + oc_bottom * overcast
+
+        haze = float((turbidity - 1.0) / 3.0);
+        haze = np.clip(haze, 0.0, 1.0)
+        horizon = horizon * (1.0 - 0.18 * haze) + bottom * (0.18 * haze)  # haze pulls horizon toward bottom
+        top = top * (1.0 - 0.06 * haze) + horizon * (0.06 * haze)
+
+        # small saturation jitter to keep skies varied (but not neon)
+        sat_jit = float(rng.uniform(-0.04, 0.05) * (1.0 - overcast))
+
+        def tweak_sat(c):
+            rgb = c[:3]
+            lum = float(np.dot(rgb, [0.2126, 0.7152, 0.0722]))
+            rgb = lum + (rgb - lum) * (1.0 + sat_jit)
+            return np.array([*np.clip(rgb, 0.0, 1.0), 1.0], dtype="f4")
+
+        top, horizon, bottom = tweak_sat(top), tweak_sat(horizon), tweak_sat(bottom)
+
+        # luminance floors so zenith/horizon never go near-black from jitter
+        def ensure_luma(c, min_l):
+            rgb = c[:3].copy()
+            lum = float(np.dot(rgb, [0.2126, 0.7152, 0.0722]))
+            if lum < min_l:
+                rgb = np.clip(rgb + (min_l - lum), 0.0, 1.0)
+            return np.array([*rgb, 1.0], dtype="f4")
+
+        horizon = ensure_luma(horizon, 0.60)
+        top = ensure_luma(top, 0.48)
+
+        # exports used by fog/lighting
+        self.base_fog_color = horizon[:3].astype("f4")
+        self.sky_brightness = float(np.dot(self.base_fog_color, [0.2126, 0.7152, 0.0722]))
+
+        # ---------- banding-free vertical gradient (curved) ----------
+        rows = 64  # smoother than 32, still cheap
+        verts = []
+
+        def lerp(a, b, k):
+            return a * (1.0 - k) + b * k
+
+        # curve shaping: y in [-1,1] → u in [0,1] with extra weight near horizon
+        def curve(u):
+            # cubic smoothstep + slight bias to emphasize color change near horizon
+            u = u * u * (3.0 - 2.0 * u)
+            return np.clip(0.85 * u + 0.15 * u * u, 0.0, 1.0)
+
+        for i in range(rows):
+            y0 = -1.0 + 2.0 * (i / rows)
+            y1 = -1.0 + 2.0 * ((i + 1) / rows)
+            u0 = curve((y0 + 1.0) * 0.5)  # 0 bottom, 0.5 horizon, 1 top
+            u1 = curve((y1 + 1.0) * 0.5)
+
+            # blend: bottom→horizon up to ~0.5, then horizon→top
+            def gc(u):
+                k = np.clip(u * 2.0, 0.0, 1.0)  # 0..1 for bottom→horizon
+                j = np.clip((u - 0.5) * 2.0, 0.0, 1.0)  # 0..1 for horizon→top
+                col = lerp(bottom, horizon, k)
+                col = lerp(col, top, j)
+                return col
+
+            c0 = gc(u0);
+            c1 = gc(u1)
+            verts += [-1.0, y0, 0.0, *c0, 1.0, y0, 0.0, *c0, -1.0, y1, 0.0, *c1,
+                      -1.0, y1, 0.0, *c1, 1.0, y0, 0.0, *c0, 1.0, y1, 0.0, *c1]
+
+        data = np.asarray(verts, dtype="f4")
+        if self.sky_vbo is not None: self.sky_vbo.release()
         self.sky_vbo = self.ctx.buffer(data.tobytes())
         self.sky_vao = self.ctx.vertex_array(self.prog, self.sky_vbo, "in_vert", "in_color")
 
-        # generate stars
-        star_count = int(200 * night_factor + 50 * dusk_dawn)
+        # ---------- twilight stars (very faint), never on horizon ----------
+        star_factor = (1.0 - overcast) * tw
+        star_count = int(180 * star_factor)  # 0..~180
         if star_count > 0:
-            xs = np.random.uniform(-1.0, 1.0, star_count)
-            ys = np.random.uniform(0.0, 1.0, star_count)
-            colors = np.ones((star_count, 4), dtype="f4")
-            alpha = (night_factor ** 2) * 1.0
-            colors[:, 3] = alpha
-            verts = np.column_stack([xs, ys, np.zeros(star_count), colors.reshape(star_count, 4)])
-            buf = verts.astype("f4").ravel()
-            if self.stars_vbo is not None:
-                self.stars_vbo.release()
-            self.stars_vbo = self.ctx.buffer(buf.tobytes())
+            xs = rng.uniform(-1.0, 1.0, star_count)
+            ys = rng.uniform(0.20, 1.0, star_count)  # keep off horizon band
+            mags = rng.uniform(0.6, 1.0, star_count) ** 2.0
+            alpha = float(np.clip(0.14 * star_factor, 0.0, 0.18))
+            cols = np.column_stack([mags, mags, mags, np.full(star_count, alpha, dtype="f4")]).astype("f4")
+            v = np.column_stack([xs, ys, np.zeros(star_count, dtype="f4"), cols]).astype("f4").ravel()
+            if self.stars_vbo is not None: self.stars_vbo.release()
+            self.stars_vbo = self.ctx.buffer(v.tobytes())
             self.stars_vao = self.ctx.vertex_array(self.prog, self.stars_vbo, "in_vert", "in_color")
         else:
             self.stars_vbo = None
             self.stars_vao = None
+
+        # keep fog/lighting in sync with the horizon; weather may tweak later
+        self.fog_color = self.base_fog_color.copy()
+        self.light_color = np.array([0.95, 0.95, 0.92], dtype="f4") * (0.70 + 0.30 * (1.0 - overcast))
 
     def set_camera(self, pos):
         self.camera_pos = np.array(pos, dtype='f4')
 
     def setup_weather(self, weather, terrain_type, road_type):
         self.wetness = 1.0 if weather == 'wet' else 0.0
-        self.fog_density = 0.0
-        # start fog color from the sky's horizon tone
-        self.fog_color = np.array(getattr(self, "base_fog_color", FOG_DEFAULT_COLOR), dtype="f4")
-        if self.wetness > 0.0:
-            self.fog_density = 0.015
-        elif terrain_type in ("sand", "gravel", "dirt"):
-            self.fog_density = 0.001
-            # dusty terrain tints the fog toward a sandy hue
-            self.fog_color = (
-                0.5 * self.fog_color + 0.5 * np.array(FOG_DUST_COLOR, dtype="f4")
-            )
 
-        terrain_map = {
-            'grass': 1,
-            'dirt': 2,
-            'sand': 2,
-            'snow': 3,
-        }
+        # Sky brightness from _generate_sky() controls base falloff
+        sky_brightness = getattr(self, "sky_brightness", 1.0)
+        self.fog_density = (1.0 - sky_brightness) * 0.02
+
+        # Start fog from the sky's horizon tone
+        horizon = np.array(getattr(self, "base_fog_color", FOG_DEFAULT_COLOR), dtype="f4")
+
+        # Weather/terrain adjustments
+        if self.wetness > 0.0:
+            self.fog_density += 0.015
+        elif terrain_type in ("sand", "gravel", "dirt"):
+            self.fog_density += 0.001
+            # Dusty terrain nudges the tint sandy
+            horizon = 0.5 * horizon + 0.5 * np.array(FOG_DUST_COLOR, dtype="f4")
+
+        # Keep it sane
+        self.fog_density = float(min(self.fog_density, 0.05))
+
+        # Final fog tint: as density rises, drift from horizon toward a neutral/white fog
+        neutral = np.array(FOG_DEFAULT_COLOR, dtype="f4")
+        d = self.fog_density / 0.05  # 0..1
+        # Bias: mostly horizon at low fog, more neutral at high fog
+        self.fog_color = ((1.0 - 0.6 * d) * horizon + (0.6 * d) * neutral).astype("f4")
+
+        terrain_map = {'grass': 1, 'dirt': 2, 'sand': 2, 'snow': 3}
         self.terrain_mode = terrain_map.get(terrain_type, 0)
 
-        # subtle surface texture for roads
-        noise_map = {
-            'asphalt': 2.5,   # larger scale noise for visible motion
-            'concrete': 1.5 , # negative selects groove pattern with wide spacing
-            'gravel': 3.5,    # coarse noise for gravel
-        }
+        noise_map = {'asphalt': 2.5, 'concrete': 1.5, 'gravel': 3.5}
         self.road_noise = noise_map.get(road_type, 0.0)
 
     def render_weather(self, mvp, dt):
@@ -200,6 +264,8 @@ class RenderContext:
             prog['wetness'].value = self.wetness
         if 'light_color' in prog:
             prog['light_color'].value = tuple(self.light_color)
+        if 'sky_brightness' in prog:
+            prog['sky_brightness'].value = float(getattr(self, 'sky_brightness', 1.0))
 
     def render_terrain(self, terrain_vao, mvp, noise_scale=0.0, terrain_mode=None):
         self.ctx.line_width = 1.0
@@ -319,24 +385,30 @@ class RenderContext:
         self.ctx.wireframe = False
         self.ctx.disable(moderngl.DEPTH_TEST)
         self.prog['mvp'].write(self.ortho.tobytes())
-        # apply fog and lighting so the skybox matches the scene
+
+        # Apply same fog/tint uniforms so the sky is hazed like the scene
         self._apply_common_uniforms(self.prog)
+
         if 'cam_pos' in self.prog:
-            # push the sky back a bit so exponential fog can affect it
-            self.prog['cam_pos'].value = (0.0, 0.0, -100.0)
+            # Push sky back so exponential fog actually attenuates it
+            self.prog['cam_pos'].value = (0.0, 0.0, -500.0)  # was -100.0
+
         if 'wetness' in self.prog:
             self.prog['wetness'].value = 0.0
         if 'noise_scale' in self.prog:
             self.prog['noise_scale'].value = 0.0
         if 'terrain_mode' in self.prog:
             self.prog['terrain_mode'].value = 0
+
         self.sky_vao.render(moderngl.TRIANGLES)
+
         if self.stars_vao is not None:
             if 'point_size' in self.prog:
                 self.prog['point_size'].value = 2.0
             self.stars_vao.render(moderngl.POINTS)
             if 'point_size' in self.prog:
                 self.prog['point_size'].value = 1.0
+
         self.ctx.enable(moderngl.DEPTH_TEST)
         self.ctx.wireframe = was_wireframe
 
