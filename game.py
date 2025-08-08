@@ -190,7 +190,7 @@ with open("data/cars.json") as f:
     cars = json.load(f)
 idx = 0
 car = Car(terrain, cars[idx])
-pos, rot = get_safe_start_position_and_rot(terrain, rp, 5.0)
+pos, rot = get_safe_start_position_and_rot(terrain, rp, 15.0)
 car.body.pos, car.body.rot = pos, rot
 
 # HUD fonts
@@ -200,7 +200,7 @@ hud_h = big.get_height() * 2
 
 # Main loop
 running = True
-mode = 0
+mode = 1
 substeps = 4
 wheel_acc = [0.0] * 4
 camera_mode = 0
@@ -219,8 +219,6 @@ while running:
                 mode = 0
             elif e.key == K_F2:
                 mode = 1
-            elif e.key == K_F3:
-                mode = 2
             elif e.key == K_c:
                 camera_mode = (camera_mode + 1) % 3
             elif e.key == K_b:
@@ -276,8 +274,8 @@ while running:
     # render scene
     render_ctx.set_mode(mode)
     render_ctx.clear()
-    t_vao = terrain_vao_lit if mode == 2 else terrain_vao
-    r_vao = road_vao_lit if mode == 2 else road_vao
+    t_vao = terrain_vao_lit if mode == 1 else terrain_vao
+    r_vao = road_vao_lit if mode == 1 else road_vao
     render_ctx.render_terrain(t_vao, mvp)
     render_ctx.render_terrain(r_vao, mvp, render_ctx.road_noise, terrain_mode=0)
     if sign_post_vao: render_ctx.render_signs(sign_post_vao, mvp)

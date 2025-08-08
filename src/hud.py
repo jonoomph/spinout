@@ -61,7 +61,7 @@ def render_hud(
         hud_surf.blit(surf_gear, rect_gear)
 
     # small-text clusters
-    mode_names = {0: "Wireframe", 1: "Solid", 2: "Sunlit"}
+    mode_names = {0: "Wireframe", 1: "Textured"}
     cam_names = {0: "Follow Far", 1: "Follow Near", 2: "Driver"}
     line_h = font_small.get_height() + 3
 
@@ -94,7 +94,7 @@ def render_hud(
     hud_surf.blit(surf_steer, rect_steer)
 
     y += line_h
-    mode_txt = f"Mode: {mode_names.get(render_mode, '?')} (F1/F2/F3)"
+    mode_txt = f"Mode: {mode_names.get(render_mode, '?')} (F1/F2)"
     surf_mode = font_small.render(mode_txt, True, (255, 255, 255))
     rect_mode = surf_mode.get_rect(topright=(x_right, y))
     hud_surf.blit(surf_mode, rect_mode)

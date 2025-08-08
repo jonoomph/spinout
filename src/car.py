@@ -50,7 +50,8 @@ def collect_car_vertices(car, car_up, car_dir, dt, wheel_spin_accum):
 
     # Wheels
     for idx, wheel in enumerate(car.wheels):
-        hub_pos = car.body.pos + car.body.rot.rotate(wheel.rel_pos)
+        rel = wheel.rel_pos + np.array([0.0, wheel.compression, 0.0])
+        hub_pos = car.body.pos + car.body.rot.rotate(rel)
         # Suspension compression is computed during physics update and stored on
         # each wheel. Use that value for consistent visualization.
         compression = wheel.compression

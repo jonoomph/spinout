@@ -22,7 +22,7 @@ class RenderContext:
         from src.shaders import create_shaders
         self.prog, self.prog2d, self.prog_lit, self.prog_tex = create_shaders(self.ctx)
         self.ortho = np.eye(4, dtype='f4')  # Identity for NDC
-        self.mode = 0  # 0=wireframe,1=solid,2=solid+sun
+        self.mode = 1  # 0=wireframe,1=textured
         self.light_dir = np.array([0.5, 1.0, 0.3], dtype='f4')
         self.light_color = np.array(SUN_LIGHT_COLOR, dtype='f4')
         self.camera_pos = np.zeros(3, dtype='f4')

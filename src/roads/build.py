@@ -173,7 +173,8 @@ def build_road_vertices(
     lines_list: list[tuple[float, list[float], bool]] = []
     left_edge_off = -half_plus_sh
     right_edge_off = half_plus_sh
-    left_edge_col = cfg.YELLOW_COL if lanes == 1 else cfg.WHITE_COL
+    left_edge_col = cfg.WHITE_COL
+    right_edge_col = cfg.YELLOW_COL if lanes == 1 else cfg.WHITE_COL
     lines_list.append((left_edge_off, left_edge_col, False))
     for k in range(1, lanes):
         off = -half_road + k * lane_width
@@ -189,7 +190,7 @@ def build_road_vertices(
         col = cfg.YELLOW_COL if is_yellow else cfg.WHITE_COL
         dotted = not is_yellow
         lines_list.append((off, col, dotted))
-    lines_list.append((right_edge_off, cfg.WHITE_COL, False))
+    lines_list.append((right_edge_off, right_edge_col, False))
 
     # dash and line width
     period = cfg.DASH_LENGTH + cfg.GAP_LENGTH
