@@ -82,7 +82,7 @@ def render_hud(
         y += line_h
     if surface_info:
         hud_surf.blit(
-            font_small.render(surface_info, True, (255, 255, 255)),
+            font_small.render(f"{surface_info} (T)", True, (255, 255, 255)),
             (x_left, y),
         )
 

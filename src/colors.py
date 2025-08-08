@@ -30,4 +30,4 @@ SKY_HORIZON_COLOR = (1.0, 1.0, 1.0, 1.0)
 SKY_TOP_COLOR = (135/255, 206/255, 235/255, 1.0)
 
 # Sun light color
-SUN_LIGHT_COLOR = (1.0, 1.0, 0.9)
+SUN_LIGHT_COLOR = (1.0, 1.0, 1.0)

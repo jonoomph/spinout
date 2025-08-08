@@ -5,6 +5,7 @@ import time
 import numpy as np
 import json
 import moderngl
+from itertools import product
 
 from src.physics import Terrain, Car
 from src.roads.plan import generate_plan, get_safe_start_position_and_rot
@@ -74,6 +75,8 @@ terrain_type = rng.choice(list(TERRAIN_TYPES), p=[0.55, 0.15, 0.15, 0.15])
 weather_mod = WEATHER_MODIFIERS[weather]
 
 surface_info = f"{weather.title()} {road_type.title()} | {terrain_type.title()}"
+SURFACES = list(product(WEATHER_MODIFIERS, TERRAIN_TYPES))
+surface_idx = SURFACES.index((weather, terrain_type))
 
 show_loading(0.5, "Laying roads...", screen, loading_font)
 t = TERRAIN_TYPES[terrain_type]
@@ -151,6 +154,33 @@ terrain_vao_lit = render_ctx.ctx.vertex_array(render_ctx.prog_lit,
                                               terrain_vbo_lit,
                                               'in_vert', 'in_normal', 'in_color')
 
+
+def set_surface(new_weather, new_terrain):
+    global weather_mod, surface_info
+    t = TERRAIN_TYPES[new_terrain]
+    weather_mod = WEATHER_MODIFIERS[new_weather]
+    terrain.terrain_type = new_terrain
+    terrain.color = t["color"]
+    friction = t["friction"] * weather_mod
+    terrain.base_friction = friction
+    terrain.surface_friction.fill(friction)
+    road_mu = ROAD_TYPES[road_type]["friction"] * weather_mod
+    terrain.road_friction[terrain.road_friction > 0] = road_mu
+    col = np.array(t["color"], dtype='f4')
+    tb[:, 3:7] = col
+    terrain_vbo.write(tb.tobytes())
+    tl[:, 6:10] = col
+    terrain_vbo_lit.write(tl.tobytes())
+    render_ctx.setup_weather(new_weather, new_terrain, road_type)
+    surface_info = f"{new_weather.title()} {road_type.title()} | {new_terrain.title()}"
+
+
+def cycle_surface():
+    global surface_idx, weather, terrain_type
+    surface_idx = (surface_idx + 1) % len(SURFACES)
+    weather, terrain_type = SURFACES[surface_idx]
+    set_surface(weather, terrain_type)
+
 # Final loading
 show_loading(1.0, "Starting engines...", screen, loading_font)
 time.sleep(0.5)
@@ -198,7 +228,7 @@ while running:
             elif e.key == K_v:
                 render_ctx.wetness = 0.0 if render_ctx.wetness > 0.0 else 1.0
             elif e.key == K_t:
-                render_ctx.cycle_terrain_mode()
+                cycle_surface()
 
     # controls & car switching
     s_i, a_i, b_i, new = get_controls(pygame.key.get_pressed())
