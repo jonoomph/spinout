@@ -30,11 +30,12 @@ def render_hud(
     # clear surface
     hud_surf.fill((0, 0, 0, 0))
 
-    w, bar_h = hud_surf.get_size()
+    w, h = hud_surf.get_size()
+    bar_h = 80
     max_alpha = 180
 
-    # gradient: solid at top, fading over 70% of height
-    fade_h = int(bar_h * 1.25)
+    # gradient: solid at top, fading over bar height
+    fade_h = int(bar_h)
     grad = pygame.Surface((w, bar_h), pygame.SRCALPHA)
     for y in range(bar_h):
         if y < fade_h:
