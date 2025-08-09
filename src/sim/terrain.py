@@ -2,21 +2,23 @@
 import numpy as np
 
 def build_terrain_vertices(terrain):
-    res = terrain.res
-    cs = terrain.cell_size
+    res_x = terrain.res_x
+    res_z = terrain.res_z
+    csx = terrain.cell_size_x
+    csz = terrain.cell_size_z
     color = np.asarray(terrain.color, dtype='f4')
-    num_cells = (res - 1) * (res - 1)
+    num_cells = (res_x - 1) * (res_z - 1)
 
     # Generate all cell indices
-    I, J = np.meshgrid(np.arange(res - 1), np.arange(res - 1), indexing='ij')
+    I, J = np.meshgrid(np.arange(res_x - 1), np.arange(res_z - 1), indexing='ij')
     I = I.ravel()
     J = J.ravel()
 
     # Get all quad corners
-    x1 = I * cs
-    z1 = J * cs
-    x2 = (I + 1) * cs
-    z2 = (J + 1) * cs
+    x1 = I * csx
+    z1 = J * csz
+    x2 = (I + 1) * csx
+    z2 = (J + 1) * csz
     h11 = terrain.heights[I, J]
     h21 = terrain.heights[I + 1, J]
     h22 = terrain.heights[I + 1, J + 1]
@@ -62,21 +64,23 @@ def build_terrain_vertices(terrain):
 
 def build_terrain_triangles(terrain):
     """Vectorized and efficient mesh builder, matching original output shapes."""
-    res = terrain.res
-    cs = terrain.cell_size
+    res_x = terrain.res_x
+    res_z = terrain.res_z
+    csx = terrain.cell_size_x
+    csz = terrain.cell_size_z
     color = np.asarray(terrain.color, dtype='f4')
-    num_cells = (res - 1) * (res - 1)
+    num_cells = (res_x - 1) * (res_z - 1)
 
     # Grid indices for each cell
-    I, J = np.meshgrid(np.arange(res - 1), np.arange(res - 1), indexing='ij')
+    I, J = np.meshgrid(np.arange(res_x - 1), np.arange(res_z - 1), indexing='ij')
     I = I.ravel()
     J = J.ravel()
 
     # Get all quad corners
-    x1 = I * cs
-    z1 = J * cs
-    x2 = (I + 1) * cs
-    z2 = (J + 1) * cs
+    x1 = I * csx
+    z1 = J * csz
+    x2 = (I + 1) * csx
+    z2 = (J + 1) * csz
     h11 = terrain.heights[I, J]
     h21 = terrain.heights[I + 1, J]
     h22 = terrain.heights[I + 1, J + 1]

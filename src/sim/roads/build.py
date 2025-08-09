@@ -24,18 +24,32 @@ def _tangent(path: List[_vec2], i: int) -> _vec2:
     return (v / n) if n > 0 else np.array([0.0, 1.0])
 
 
-def _get_height(heights: np.ndarray, res: int, cell: float, size: float, x: float, z: float) -> float:
-    if not (0 <= x <= size and 0 <= z <= size):
+def _get_height(
+    heights: np.ndarray,
+    cell_x: float,
+    cell_z: float,
+    width: float,
+    height: float,
+    x: float,
+    z: float,
+) -> float:
+    if not (0 <= x <= width and 0 <= z <= height):
         return 0.0
-    ix = min(max(0, int(x / cell)), res - 2)
-    iz = min(max(0, int(z / cell)), res - 2)
-    fx = (x - ix * cell) / cell
-    fz = (z - iz * cell) / cell
+    res_x, res_z = heights.shape
+    ix = min(max(0, int(x / cell_x)), res_x - 2)
+    iz = min(max(0, int(z / cell_z)), res_z - 2)
+    fx = (x - ix * cell_x) / cell_x
+    fz = (z - iz * cell_z) / cell_z
     h00 = heights[ix, iz]
     h10 = heights[ix + 1, iz]
     h01 = heights[ix, iz + 1]
     h11 = heights[ix + 1, iz + 1]
-    return (1 - fx) * (1 - fz) * h00 + fx * (1 - fz) * h10 + (1 - fx) * fz * h01 + fx * fz * h11
+    return (
+        (1 - fx) * (1 - fz) * h00
+        + fx * (1 - fz) * h10
+        + (1 - fx) * fz * h01
+        + fx * fz * h11
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -62,9 +76,11 @@ def _stamp_road(
     half_plus_sh = half_road + shoulder
     total_half = half_plus_sh + ditch_width
 
-    cell = terrain.cell_size
-    size = terrain.size
-    res = terrain.res
+    cell_x = terrain.cell_size_x
+    cell_z = terrain.cell_size_z
+    width = terrain.width
+    height = terrain.height
+    res_x, res_z = terrain.heights.shape
     noise_dx = rng.uniform(0, 1000)
     noise_dz = rng.uniform(0, 1000)
 
@@ -72,7 +88,14 @@ def _stamp_road(
 
     # Smooth base under centerline, higher sigma for more lanes
     long_smooth_sigma = np.interp(lanes, [cfg.LANE_COUNT_MIN, cfg.LANE_COUNT_MAX], [cfg.LONG_SMOOTH_SIGMA_MIN, cfg.LONG_SMOOTH_SIGMA_MAX])
-    base_under = np.array([_get_height(heights_orig, res, cell, size, p[0], p[1]) for p in path])
+    base_under = np.array(
+        [
+            _get_height(
+                heights_orig, cell_x, cell_z, width, height, p[0], p[1]
+            )
+            for p in path
+        ]
+    )
     base_under_sm = gaussian_filter1d(base_under, long_smooth_sigma)
 
     for i, c in enumerate(path):
@@ -85,8 +108,12 @@ def _stamp_road(
         left_z = c[1] - nrm[1] * sample_off
         right_x = c[0] + nrm[0] * sample_off
         right_z = c[1] + nrm[1] * sample_off
-        h_left = _get_height(heights_orig, res, cell, size, left_x, left_z)
-        h_right = _get_height(heights_orig, res, cell, size, right_x, right_z)
+        h_left = _get_height(
+            heights_orig, cell_x, cell_z, width, height, left_x, left_z
+        )
+        h_right = _get_height(
+            heights_orig, cell_x, cell_z, width, height, right_x, right_z
+        )
         # lower side gets deeper ditch
         depth_left = ditch_depth * (1.3 if h_left < h_right else 0.7)
         depth_right = ditch_depth * (1.3 if h_right < h_left else 0.7)
@@ -99,13 +126,16 @@ def _stamp_road(
         for d in across:
             x = c[0] + nrm[0] * d
             z = c[1] + nrm[1] * d
-            if not (0 <= x <= size and 0 <= z <= size):
+            if not (0 <= x <= width and 0 <= z <= height):
                 continue
-            ix = int(x / cell); iz = int(z / cell)
-            if ix < 0 or ix >= res or iz < 0 or iz >= res:
+            ix = int(x / cell_x)
+            iz = int(z / cell_z)
+            if ix < 0 or ix >= res_x or iz < 0 or iz >= res_z:
                 continue
             dist = abs(d)
-            orig = _get_height(heights_orig, res, cell, size, x, z)
+            orig = _get_height(
+                heights_orig, cell_x, cell_z, width, height, x, z
+            )
             if dist <= half_plus_sh:
                 ht = base - math.tan(cross_pitch_rad) * dist
                 n = pnoise2(x * noise_f + noise_dx, z * noise_f + noise_dz)
@@ -126,12 +156,13 @@ def _stamp_road(
 
     # Corridor-only smoothing to tidy edges
     mask = np.zeros_like(terrain.heights, dtype=float)
-    pad = int((total_half + 2.0) / cell) + 2
+    min_cell = min(cell_x, cell_z)
+    pad = int((total_half + 2.0) / min_cell) + 2
     for p in path:
-        cx = int(p[0] / cell)
-        cz = int(p[1] / cell)
-        x0 = max(0, cx - pad); x1 = min(res, cx + pad + 1)
-        z0 = max(0, cz - pad); z1 = min(res, cz + pad + 1)
+        cx = int(p[0] / cell_x)
+        cz = int(p[1] / cell_z)
+        x0 = max(0, cx - pad); x1 = min(res_x, cx + pad + 1)
+        z0 = max(0, cz - pad); z1 = min(res_z, cz + pad + 1)
         mask[x0:x1, z0:z1] = 1.0
     smoothed = gaussian_filter(terrain.heights, sigma=5.0, mode="nearest")
     terrain.heights = smoothed * mask + terrain.heights * (1.0 - mask)
@@ -161,7 +192,7 @@ def build_road_vertices(
     def base_height(x: float, z: float) -> float:
         return float(terrain.get_height(x, z))
 
-    cell = terrain.cell_size
+    cell = min(terrain.cell_size_x, terrain.cell_size_z)
     along_step = max(cell * cfg.ALONG_STEP_FACTOR, 0.35)
     half_road = 0.5 * lane_width * lanes
     half_plus_sh = half_road + shoulder
@@ -410,23 +441,28 @@ def apply_plan(terrain, path: List[Tuple[float, float]], params: dict, rng: np.r
     if rng is None:
         rng = np.random.default_rng()
     if cfg.UPSAMPLE_FACTOR > 1:
-        old_res = terrain.res
-        old_cell = terrain.cell_size
-        old_size = terrain.size
-        new_res = (old_res - 1) * cfg.UPSAMPLE_FACTOR + 1
-        new_cell = old_size / (new_res - 1)
-        x_old = np.linspace(0, old_size, old_res)
-        z_old = x_old
-        x_new = np.linspace(0, old_size, new_res)
-        z_new = x_new
-        spline = RectBivariateSpline(x_old, z_old, terrain.heights.T, kx=3, ky=3)
-        terrain.heights = spline(x_new, z_new).T
-        spline_fric = RectBivariateSpline(x_old, z_old, terrain.surface_friction.T, kx=1, ky=1)
-        terrain.surface_friction = spline_fric(x_new, z_new).T
-        spline_road = RectBivariateSpline(x_old, z_old, terrain.road_friction.T, kx=1, ky=1)
-        terrain.road_friction = spline_road(x_new, z_new).T
-        terrain.res = new_res
-        terrain.cell_size = new_cell
+        old_res_x = terrain.res_x
+        old_res_z = terrain.res_z
+        old_width = terrain.width
+        old_height = terrain.height
+        new_res_x = (old_res_x - 1) * cfg.UPSAMPLE_FACTOR + 1
+        new_res_z = (old_res_z - 1) * cfg.UPSAMPLE_FACTOR + 1
+        new_cell_x = old_width / (new_res_x - 1)
+        new_cell_z = old_height / (new_res_z - 1)
+        x_old = np.linspace(0, old_width, old_res_x)
+        z_old = np.linspace(0, old_height, old_res_z)
+        x_new = np.linspace(0, old_width, new_res_x)
+        z_new = np.linspace(0, old_height, new_res_z)
+        spline = RectBivariateSpline(x_old, z_old, terrain.heights, kx=3, ky=3)
+        terrain.heights = spline(x_new, z_new)
+        spline_fric = RectBivariateSpline(x_old, z_old, terrain.surface_friction, kx=1, ky=1)
+        terrain.surface_friction = spline_fric(x_new, z_new)
+        spline_road = RectBivariateSpline(x_old, z_old, terrain.road_friction, kx=1, ky=1)
+        terrain.road_friction = spline_road(x_new, z_new)
+        terrain.res_x = new_res_x
+        terrain.res_z = new_res_z
+        terrain.cell_size_x = new_cell_x
+        terrain.cell_size_z = new_cell_z
     _stamp_road(
         terrain,
         [np.array(p) for p in path],

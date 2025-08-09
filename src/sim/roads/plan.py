@@ -213,8 +213,9 @@ def _generate_bottom_to_top(
     max_spline_turn_deg=45.0,
     check_meters=300.0,
 ):
-    size = terrain.size
-    x = rng.uniform(0.15 * size, 0.85 * size)
+    width = terrain.width
+    height = terrain.height
+    x = rng.uniform(0.15 * width, 0.85 * width)
     y = 0.0
 
     step = 100.0
@@ -232,13 +233,13 @@ def _generate_bottom_to_top(
 
     min_angle = 0.0
     angle_step = np.deg2rad(10)
-    min_map_x = 0.05 * size
-    max_map_x = 0.95 * size
+    min_map_x = 0.05 * width
+    max_map_x = 0.95 * width
 
     points = [np.array([x, y])]
     print(f"[debug] Start point: ({x:.2f}, {y:.2f})")
 
-    while y < size:
+    while y < height:
         found_point = False
         try_angles = np.arange(max_angle, min_angle - angle_step, -angle_step)
         for angle_offset in try_angles:
@@ -253,8 +254,8 @@ def _generate_bottom_to_top(
                 dy = step
                 x_new = np.clip(x, min_map_x, max_map_x)
                 y_new = y + dy
-                if y_new >= size:
-                    y_new = size
+                if y_new >= height:
+                    y_new = height
                 points.append(np.array([x_new, y_new]))
                 print(f"[debug] Forcibly added straight control point: ({x_new:.2f}, {y_new:.2f})")
                 x, y = x_new, y_new
@@ -266,8 +267,8 @@ def _generate_bottom_to_top(
             dy = step * np.sin(angle)
             x_new = np.clip(x + dx, min_map_x, max_map_x)
             y_new = y + dy
-            if y_new >= size:
-                y_new = size
+            if y_new >= height:
+                y_new = height
                 x_new = np.clip(x_new + rng.uniform(-30, 30), min_map_x, max_map_x)
 
             # Try this point
@@ -278,7 +279,7 @@ def _generate_bottom_to_top(
                 cs = CubicSpline(ys, xs, bc_type="natural")
                 y_test = np.linspace(max(0, ys[-1] - check_meters), ys[-1], 10)
                 x_test = cs(y_test)
-                if np.any(x_test < 0) or np.any(x_test > size):
+                if np.any(x_test < 0) or np.any(x_test > width):
                     continue  # out of bounds
 
                 heading_change = _max_tail_heading_change(x_test, y_test, check_meters)
@@ -303,7 +304,7 @@ def _generate_bottom_to_top(
     xs = [pt[0] for pt in points]
     ys = [pt[1] for pt in points]
     cs = CubicSpline(ys, xs, bc_type="natural")
-    n_samples = max(2, int(size // 2))
+    n_samples = max(2, int(height // 2))
     y_samples = np.linspace(0, ys[-1], n_samples)
     x_samples = cs(y_samples)
 
@@ -535,7 +536,8 @@ def generate_plan(
     path_arr = np.array(path)
     ds = np.linalg.norm(np.diff(path_arr, axis=0), axis=1)
     path_length = np.sum(ds)
-    sinuosity = path_length / terrain.size if terrain.size > 0 else 1.0
+    norm = max(terrain.width, terrain.height)
+    sinuosity = path_length / norm if norm > 0 else 1.0
 
     heights_orig = terrain.heights.copy()
     h_min = np.min(heights_orig)
@@ -623,14 +625,15 @@ def preview_plan(terrain, road_points, lanes=1):
     """
     # terrain.heights: (res × res) array
     heights = terrain.heights
-    size = terrain.size
+    width = terrain.width
+    height = terrain.height
 
     plt.figure(figsize=(6, 6))
     plt.imshow(
         heights.T,
         origin='lower',
         cmap='terrain',
-        extent=[0, size, 0, size],
+        extent=[0, width, 0, height],
         alpha=0.8
     )
 
@@ -672,10 +675,10 @@ if __name__ == "__main__":
         from .build import apply_plan
 
     rng = np.random.default_rng()
-    terrain = Terrain(size=800, res=200)
+    terrain = Terrain(res=120)
     pts, params = generate_plan(terrain, rng=rng)
     apply_plan(terrain, pts, params, rng=rng)
 
-    print(f"Generated road with {len(pts)} points on {terrain.res}×{terrain.res} terrain")
+    print(f"Generated road with {len(pts)} points on {terrain.res_x}×{terrain.res_z} terrain")
     preview_plan(terrain, pts, params['lanes'])
 

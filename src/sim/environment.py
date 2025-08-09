@@ -161,8 +161,7 @@ class Environment:
             self.road_type = "asphalt"
             self.terrain_type = "asphalt"
             self.terrain = Terrain(
-                size=800,
-                res=200,
+                res=120,
                 height_scale=0,
                 sigma=0,
                 terrain_type="asphalt",
@@ -182,8 +181,7 @@ class Environment:
             weather_mod = WEATHER_MODIFIERS[self.weather]
             t = TERRAIN_TYPES[self.terrain_type]
             self.terrain = Terrain(
-                size=800,
-                res=200,
+                res=120,
                 terrain_type=self.terrain_type,
                 color=t["color"],
                 friction=t["friction"] * weather_mod,
@@ -225,13 +223,14 @@ class Environment:
         self.car_info = f"{car_data['make']} {car_data['model']} ({car_data['year']})"
 
         if self.cfg.get("flat"):
-            start = self.terrain.size / 4
+            start_x = self.terrain.width / 4
+            start_z = self.terrain.height / 4
             rest_y = (
-                self.terrain.get_height(start, start)
+                self.terrain.get_height(start_x, start_z)
                 + self.car.wheels[0].radius
                 + self.car.wheels[0].suspension_rest
             )
-            self.car.body.pos = np.array([start, rest_y, start])
+            self.car.body.pos = np.array([start_x, rest_y, start_z])
         else:
             pos, rot = get_safe_start_position_and_rot(self.terrain, rp, 15.0)
             self.car.body.pos, self.car.body.rot = pos, rot
@@ -285,13 +284,14 @@ class Environment:
 
         # Spawn new car at the same safe start used during reset
         if self.cfg.get("flat"):
-            start = self.terrain.size / 4
+            start_x = self.terrain.width / 4
+            start_z = self.terrain.height / 4
             rest_y = (
-                self.terrain.get_height(start, start)
+                self.terrain.get_height(start_x, start_z)
                 + self.car.wheels[0].radius
                 + self.car.wheels[0].suspension_rest
             )
-            pos = np.array([start, rest_y, start])
+            pos = np.array([start_x, rest_y, start_z])
             rot = self.car.body.rot
         else:
             pos, rot = get_safe_start_position_and_rot(self.terrain, self.rp, 15.0)
@@ -547,9 +547,9 @@ class Environment:
         pos = self.car.body.pos
         if (
             pos[0] < 0
-            or pos[0] > self.terrain.size
+            or pos[0] > self.terrain.width
             or pos[2] < 0
-            or pos[2] > self.terrain.size
+            or pos[2] > self.terrain.height
         ):
             terminated = True
             self.termination_reason = "off_terrain"

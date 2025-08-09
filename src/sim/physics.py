@@ -195,33 +195,43 @@ class PowerTrain:
 class Terrain:
     def __init__(
         self,
-        size=400,
-        res=50,
-        height_scale=100,
-        sigma=5,
-        terrain_type="grass",
+        width: float = 400.0,
+        height: float = 1200.0,
+        # Use a coarse default resolution so rectangular maps match the
+        # original ~50×50 square mesh in complexity
+        res: int = 30,
+        height_scale: float = 100.0,
+        sigma: float = 5.0,
+        terrain_type: str = "grass",
         color=None,
-        friction=1.0,
+        friction: float = 1.0,
     ):
-        self.size = size
-        self.res = res
-        self.cell_size = size / (res - 1)
-        noise = np.random.uniform(-height_scale, height_scale, (res, res))
-        self.heights = gaussian_filter(noise, sigma=sigma)
+        self.width = width
+        self.height = height
+        # Maintain roughly square cells regardless of aspect ratio
+        self.res_x = res
+        self.res_z = int(round((height / width) * (res - 1))) + 1
+        # Preserve legacy attribute for callers assuming square terrain
+        self.res = self.res_x
+        self.cell_size_x = width / (self.res_x - 1)
+        self.cell_size_z = height / (self.res_z - 1)
+        noise = np.random.uniform(-height_scale, height_scale, (self.res_x, self.res_z))
+        # Use equal smoothing in both axes (meters)
+        self.heights = gaussian_filter(noise, sigma=[sigma, sigma])
         self.terrain_type = terrain_type
         self.color = color or list(TERRAIN_DEFAULT_COLOR)
         self.base_friction = friction
-        self.surface_friction = np.full((res, res), friction, dtype=float)
+        self.surface_friction = np.full((self.res_x, self.res_z), friction, dtype=float)
         # Separate map for road friction so terrain choice does not affect roads
-        self.road_friction = np.zeros((res, res), dtype=float)
+        self.road_friction = np.zeros((self.res_x, self.res_z), dtype=float)
 
     def get_height(self, x, z):
-        if x < 0 or x > self.size or z < 0 or z > self.size:
+        if x < 0 or x > self.width or z < 0 or z > self.height:
             return float("-inf")
-        ix = min(max(int(x / self.cell_size), 0), self.res - 2)
-        iz = min(max(int(z / self.cell_size), 0), self.res - 2)
-        fx = (x - ix * self.cell_size) / self.cell_size
-        fz = (z - iz * self.cell_size) / self.cell_size
+        ix = min(max(int(x / self.cell_size_x), 0), self.res_x - 2)
+        iz = min(max(int(z / self.cell_size_z), 0), self.res_z - 2)
+        fx = (x - ix * self.cell_size_x) / self.cell_size_x
+        fz = (z - iz * self.cell_size_z) / self.cell_size_z
         h00 = self.heights[ix, iz]
         h10 = self.heights[ix + 1, iz]
         h01 = self.heights[ix, iz + 1]
@@ -232,7 +242,7 @@ class Terrain:
 
     def get_normal(self, x, z):
         dx = 0.1
-        if x < dx or x > self.size - dx or z < dx or z > self.size - dx:
+        if x < dx or x > self.width - dx or z < dx or z > self.height - dx:
             return np.array([0.0, 1.0, 0.0])
         dyx = self.get_height(x + dx, z) - self.get_height(x - dx, z)
         dyz = self.get_height(x, z + dx) - self.get_height(x, z - dx)
@@ -243,10 +253,10 @@ class Terrain:
         return normal / norm
 
     def get_friction(self, x, z):
-        if x < 0 or x > self.size or z < 0 or z > self.size:
+        if x < 0 or x > self.width or z < 0 or z > self.height:
             return self.base_friction
-        ix = min(max(int(x / self.cell_size), 0), self.res - 1)
-        iz = min(max(int(z / self.cell_size), 0), self.res - 1)
+        ix = min(max(int(x / self.cell_size_x), 0), self.res_x - 1)
+        iz = min(max(int(z / self.cell_size_z), 0), self.res_z - 1)
         road_mu = self.road_friction[ix, iz]
         if road_mu > 0:
             return float(road_mu)
@@ -458,9 +468,9 @@ class Car:
         pos = self.body.pos + self.body.rot.rotate(wheel.rel_pos)
         if (
             pos[0] < 0
-            or pos[0] > self.terrain.size
+            or pos[0] > self.terrain.width
             or pos[2] < 0
-            or pos[2] > self.terrain.size
+            or pos[2] > self.terrain.height
         ):
             wheel.is_grounded = False
             wheel.compression = 0.0
