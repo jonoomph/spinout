@@ -227,8 +227,7 @@ class Environment:
             start_z = self.terrain.height / 4
             rest_y = (
                 self.terrain.get_height(start_x, start_z)
-                + self.car.wheels[0].radius
-                + self.car.wheels[0].suspension_rest
+                + self.car.cg_height
             )
             self.car.body.pos = np.array([start_x, rest_y, start_z])
         else:
@@ -286,18 +285,15 @@ class Environment:
         if self.cfg.get("flat"):
             start_x = self.terrain.width / 4
             start_z = self.terrain.height / 4
-            rest_y = (
-                self.terrain.get_height(start_x, start_z)
-                + self.car.wheels[0].radius
-                + self.car.wheels[0].suspension_rest
-            )
-            pos = np.array([start_x, rest_y, start_z])
+            ground_h = self.terrain.get_height(start_x, start_z)
             rot = self.car.body.rot
+            self.car = Car(self.terrain, car_data)
+            self.car.body.pos = np.array([start_x, ground_h + self.car.cg_height, start_z])
+            self.car.body.rot = rot
         else:
             pos, rot = get_safe_start_position_and_rot(self.terrain, self.rp, 15.0)
-
-        self.car = Car(self.terrain, car_data)
-        self.car.body.pos, self.car.body.rot = pos, rot
+            self.car = Car(self.terrain, car_data)
+            self.car.body.pos, self.car.body.rot = pos, rot
         self.car_info = f"{car_data['make']} {car_data['model']} ({car_data['year']})"
         self.cfg["car_index"] = car_index
 
@@ -327,8 +323,9 @@ class Environment:
         import moderngl
         from .render import RenderContext
         from .terrain import build_terrain_triangles
-        from .roads.build import build_road_vertices
+        from .roads.build import build_road_vertices, build_speed_sign_vertices
         from .bbmodel import load_bbmodel
+        from .signs.build import generate_speed_limit_sign
 
         self._set_status(0.8, "Building meshes...")
 
@@ -353,8 +350,35 @@ class Environment:
             self.road_vao = self.render_ctx.ctx.vertex_array(
                 self.render_ctx.prog, self.road_vbo, "in_vert", "in_color"
             )
+            posts, billboards = build_speed_sign_vertices(
+                self.terrain,
+                self.rp,
+                self.plan["lane_width"],
+                self.plan["lanes"],
+                self.plan["shoulder"],
+                self.plan.get("speed_limits"),
+            )
+            if len(posts):
+                self.sign_post_vbo = self.render_ctx.ctx.buffer(posts.tobytes())
+                self.sign_post_vao = self.render_ctx.ctx.vertex_array(
+                    self.render_ctx.prog, self.sign_post_vbo, "in_vert", "in_color"
+                )
+            else:
+                self.sign_post_vao = None
+            self.sign_billboards = []
+            for bb in billboards:
+                img = generate_speed_limit_sign(bb["speed"])
+                tex = self.render_ctx.ctx.texture(img.size, 4, img.tobytes())
+                tex.filter = (moderngl.LINEAR, moderngl.LINEAR)
+                vbo = self.render_ctx.ctx.buffer(bb["verts"].tobytes())
+                vao = self.render_ctx.ctx.vertex_array(
+                    self.render_ctx.prog_tex, vbo, "in_vert", "in_tex"
+                )
+                self.sign_billboards.append((vao, tex))
         else:
             self.road_vao = None
+            self.sign_post_vao = None
+            self.sign_billboards = []
 
         self.wheel_spin = [0.0] * 4
         self.font_small = pygame.font.SysFont(None, 24)
@@ -409,6 +433,10 @@ class Environment:
         if self.road_vao is not None:
             self.render_ctx.render_terrain(self.road_vao, mvp, self.render_ctx.road_noise)
         self.render_ctx.render_terrain(self.t_vao, mvp, self.render_ctx.road_noise)
+        if self.sign_post_vao is not None:
+            self.render_ctx.render_signs(self.sign_post_vao, mvp)
+        for vao, tex in self.sign_billboards:
+            self.render_ctx.render_billboard(vao, tex, mvp)
 
         car_lines = collect_car_vertices(self.car, car_up_vec, car_dir, dt, self.wheel_spin)
         if getattr(self, "use_bbmodel", False):

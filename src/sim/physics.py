@@ -79,11 +79,25 @@ class RigidBody:
         accel = self.force / self.mass
         self.vel += accel * dt
         self.pos += self.vel * dt
-        angaccel = self.torque / self.inertia
+        # Compute world-space inertia tensor
+        w, x, y, z = self.rot.arr
+        R = np.array(
+            [
+                [1 - 2 * (y**2 + z**2), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+                [2 * (x * y + z * w), 1 - 2 * (x**2 + z**2), 2 * (y * z - x * w)],
+                [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x**2 + y**2)],
+            ]
+        )
+        I_body = np.diag(self.inertia)
+        I_world = R @ I_body @ R.T
+        angaccel = np.linalg.solve(
+            I_world, self.torque - np.cross(self.angvel, I_world @ self.angvel)
+        )
         self.angvel += angaccel * dt
-        if np.linalg.norm(self.angvel) > 0:
-            angle = np.linalg.norm(self.angvel) * dt
-            axis = self.angvel / np.linalg.norm(self.angvel)
+        angvel_mag = np.linalg.norm(self.angvel)
+        if angvel_mag > 0:
+            angle = angvel_mag * dt
+            axis = self.angvel / angvel_mag
             dq = Quaternion()
             dq.from_axis_angle(axis, angle)
             self.rot = dq.multiply(self.rot)
@@ -97,7 +111,7 @@ class Wheel:
         self,
         rel_pos,
         radius,
-        suspension_rest,
+        suspension_travel,
         spring_k,
         damper_k,
         is_front,
@@ -106,7 +120,7 @@ class Wheel:
     ):
         self.rel_pos = rel_pos
         self.radius = radius
-        self.suspension_rest = suspension_rest
+        self.suspension_travel = suspension_travel
         self.spring_k = spring_k
         self.damper_k = damper_k
         self.is_front = is_front
@@ -118,7 +132,7 @@ class Wheel:
         self.slip_ratio = 0.0
         self.is_grounded = True
         # Amount of suspension compression used in physics calculations
-        # (0 = fully extended, suspension_rest = fully compressed)
+        # (0 = fully extended, suspension_travel = fully compressed)
         self.compression = 0.0
 
 
@@ -268,14 +282,23 @@ class Car:
         self.terrain = terrain
         # Load parameters from car_data
         mass = car_data["mass_kg"]
-        inertia = np.array(car_data["inertia_diagonal"], dtype=float)  # [Ixx, Iyy, Izz]
+        inertia = np.array(car_data["inertia_diagonal"], dtype=float)
         wheelbase = car_data["wheelbase_m"]
         track = car_data["track_m"]
-        radius = car_data["wheel_radius_m"]
-        suspension_rest = car_data["suspension_rest_m"]
-        tire_width = car_data["tire"]["width_mm"] / 1000.0
-        # Allow per-car brake torque tuning; default to original value
-        self.brake_torque = car_data.get("brake_torque_nm", 2800)
+        tire = car_data["tire"]
+        tire_width = tire["width_mm"] / 1000.0
+        sidewall = tire_width * (tire["aspect_ratio_pct"] / 100.0)
+        rim_radius = tire["rim_diameter_in"] * 0.0254 / 2
+        radius_calc = rim_radius + sidewall
+        if "wheel_radius_m" in car_data:
+            if abs(car_data["wheel_radius_m"] - radius_calc) > 0.01:
+                print(f"Warning: wheel radius mismatch for {car_data['model']}")
+        radius = radius_calc
+        self.cg_height = car_data.get("cg_height_m", radius)
+        suspension_travel = car_data.get("suspension_travel_m", 0.25)
+        brake_info = car_data.get("brakes", {"base_torque_nm": 8000, "front_bias_pct": 65})
+        self.brake_base_torque = brake_info.get("base_torque_nm", 8000)
+        self.brake_bias = brake_info.get("front_bias_pct", 65)
         engine_data = car_data.get("engine", {})
         torque_curve = engine_data.get("torque_curve", {})
         gear_ratios = engine_data.get("gear_ratios", [1.0])
@@ -308,8 +331,19 @@ class Car:
         tire_stiffness = car_data.get("tire_stiffness", {})
         self.long_stiffness = tire_stiffness.get("longitudinal", 10.0)
         self.lat_stiffness = tire_stiffness.get("lateral", 5.0)
+        self.front_lat_scale = car_data.get("front_lat_scale", 1.1)
 
         self.body = RigidBody(mass, inertia)
+        # quick sanity check for inertia vs box estimate
+        l, w, h = dimensions["length"], dimensions["width"], dimensions["height"]
+        box = np.array([
+            mass * (h**2 + l**2) / 12,
+            mass * (w**2 + l**2) / 12,
+            mass * (w**2 + h**2) / 12,
+        ])
+        diff = np.abs(inertia - box) / box
+        if np.any(diff > 0.35):
+            print(f"Warning: inertia for {car_data['model']} differs by >35%")
         self.dimensions = dimensions
         self.weight_distribution = weight_distribution
         self.ground_clearance = ground_clearance
@@ -321,41 +355,54 @@ class Car:
         half_length = dimensions["length"] / 2
         half_width = dimensions["width"] / 2
         half_height = dimensions["height"] / 2
-        g = 9.81
-        front_pct = weight_distribution["front"] / 100
-        rear_pct = weight_distribution["rear"] / 100
-        front_load_per_wheel = mass * g * front_pct / 2
-        rear_load_per_wheel = mass * g * rear_pct / 2
-        front_compression = front_load_per_wheel / spring_k_front
-        rear_compression = rear_load_per_wheel / spring_k_rear
-        sag_cog = front_compression * front_pct + rear_compression * rear_pct
-        # Keep the bottom clearance equal to the specified ground clearance when
-        # the car is resting under its own weight.
-        self.body_offset = ground_clearance - radius - suspension_rest + sag_cog + half_height
+        self.body_offset = ground_clearance + half_height - self.cg_height
 
-        # Define top corner collision points with offset
+        # Collision points aligned with the rendered box. Include bottom edge
+        # midpoints and center to avoid ground clipping when the car rolls.
+        top_y = half_height + self.body_offset
+        bottom_y = -half_height + self.body_offset
         self.collision_points = [
-            np.array([half_width, half_height + self.body_offset, half_length]),
-            np.array([-half_width, half_height + self.body_offset, half_length]),
-            np.array([half_width, half_height + self.body_offset, -half_length]),
-            np.array([-half_width, half_height + self.body_offset, -half_length]),
+            # top corners
+            np.array([ half_width,  top_y,  half_length]),
+            np.array([-half_width, top_y,  half_length]),
+            np.array([ half_width,  top_y, -half_length]),
+            np.array([-half_width, top_y, -half_length]),
+            # bottom corners
+            np.array([ half_width,  bottom_y,  half_length]),
+            np.array([-half_width, bottom_y,  half_length]),
+            np.array([ half_width,  bottom_y, -half_length]),
+            np.array([-half_width, bottom_y, -half_length]),
+            # bottom edge midpoints and center
+            np.array([0.0, bottom_y,  half_length]),
+            np.array([0.0, bottom_y, -half_length]),
+            np.array([ half_width, bottom_y, 0.0]),
+            np.array([-half_width, bottom_y, 0.0]),
+            np.array([0.0, bottom_y, 0.0]),
         ]
 
-        # Wheel positions
-        wheel_y = -suspension_rest
+        # Wheel positions with static compression so the body sits at ground clearance
+        wheel_y = -(self.cg_height - radius)
+        g = 9.81
+        front_load = mass * g * weight_distribution["front"] / 100 / 2
+        rear_load = mass * g * weight_distribution["rear"] / 100 / 2
+        front_comp = front_load / spring_k_front
+        rear_comp = rear_load / spring_k_rear
         self.wheels = []
         self._build_wheels(
             wheel_y,
             track,
             wheelbase,
             radius,
-            suspension_rest,
+            suspension_travel,
             spring_k_front,
             spring_k_rear,
             damper_k_front,
             damper_k_rear,
             drive_type,
             tire_width,
+            weight_distribution,
+            front_comp,
+            rear_comp,
         )
         self.steer = 0
         self.accel = 0
@@ -415,19 +462,26 @@ class Car:
         track,
         wheelbase,
         radius,
-        suspension_rest,
+        suspension_travel,
         spring_k_front,
         spring_k_rear,
         damper_k_front,
         damper_k_rear,
         drive_type,
         tire_width,
+        weight_distribution,
+        front_comp,
+        rear_comp,
     ):
+        front_pct = weight_distribution["front"] / 100
+        rear_pct = weight_distribution["rear"] / 100
+        front_z = wheelbase * rear_pct
+        rear_z = -wheelbase * front_pct
         positions = [
-            (-track / 2, wheel_y, wheelbase / 2),
-            (track / 2, wheel_y, wheelbase / 2),
-            (-track / 2, wheel_y, -wheelbase / 2),
-            (track / 2, wheel_y, -wheelbase / 2),
+            (-track / 2, wheel_y - front_comp, front_z),
+            (track / 2, wheel_y - front_comp, front_z),
+            (-track / 2, wheel_y - rear_comp, rear_z),
+            (track / 2, wheel_y - rear_comp, rear_z),
         ]
         springs = [spring_k_front, spring_k_front, spring_k_rear, spring_k_rear]
         dampers = [damper_k_front, damper_k_front, damper_k_rear, damper_k_rear]
@@ -438,19 +492,20 @@ class Car:
             drive_type in ["RWD", "AWD"],
             drive_type in ["RWD", "AWD"],
         ]
-        for pos, sk, dk, f, d in zip(positions, springs, dampers, fronts, drivens):
-            self.wheels.append(
-                Wheel(
-                    np.array(pos, dtype=float),
-                    radius,
-                    suspension_rest,
-                    sk,
-                    dk,
-                    f,
-                    d,
-                    tire_width,
-                )
+        comps = [front_comp, front_comp, rear_comp, rear_comp]
+        for pos, sk, dk, f, d, comp in zip(positions, springs, dampers, fronts, drivens, comps):
+            w = Wheel(
+                np.array(pos, dtype=float),
+                radius,
+                suspension_travel,
+                sk,
+                dk,
+                f,
+                d,
+                tire_width,
             )
+            w.compression = comp
+            self.wheels.append(w)
 
     def _apply_gravity_drag(self):
         gravity = np.array([0.0, -9.81, 0.0]) * self.body.mass
@@ -478,12 +533,16 @@ class Car:
         ground_h = self.terrain.get_height(pos[0], pos[2])
         compression = ground_h + wheel.radius - pos[1]
         wheel.is_grounded = compression > 0 and not self.is_upside_down
-        wheel.compression = max(0.0, compression) if wheel.is_grounded else 0.0
+        compression = min(max(0.0, compression), wheel.suspension_travel) if wheel.is_grounded else 0.0
+        wheel.compression = compression
         if not wheel.is_grounded:
             return 0
         rel_pos = pos - self.body.pos
         vel_at = self.body.vel + np.cross(self.body.angvel, rel_pos)
-        spring_f = wheel.spring_k * compression
+        bump = 0.0
+        if compression > wheel.suspension_travel * 0.9:
+            bump = wheel.spring_k * 10 * (compression - wheel.suspension_travel * 0.9)
+        spring_f = wheel.spring_k * compression + bump
         damper_f = -wheel.damper_k * vel_at[1]
         normal_f = max(0, spring_f + damper_f)
         if normal_f == 0:
@@ -518,7 +577,8 @@ class Car:
         width_factor = wheel.width / 0.2
         max_fric = mu * load * width_factor
         long_f = max_fric * math.tanh(self.long_stiffness * slip)
-        lat_f = -max_fric * math.tanh(self.lat_stiffness * alpha)
+        lat_stiff = self.lat_stiffness * (self.front_lat_scale if wheel.is_front else 1.0)
+        lat_f = -max_fric * math.tanh(lat_stiff * alpha)
         gravity_pw = g_front if wheel.is_front else g_rear
         if is_static:
             proj_g = gravity_pw - np.dot(gravity_pw, normal) * normal
@@ -549,7 +609,9 @@ class Car:
                 brake_sign = math.copysign(1, wheel.ang_vel)
             elif abs(long_v) > 0.01:
                 brake_sign = math.copysign(1, long_v)
-        brake_t = -self.brake * self.brake_torque * brake_sign if brake_sign else 0
+        bias = self.brake_bias / 100 if wheel.is_front else (1 - self.brake_bias / 100)
+        brake_torque = self.brake_base_torque * bias
+        brake_t = -self.brake * brake_torque * brake_sign if brake_sign else 0
         friction_t = 0 if is_static else -long_f * wheel.radius
         if self.brake > 0 and abs(long_v) < 0.3 and wheel.is_grounded:
             wheel.ang_vel = 0

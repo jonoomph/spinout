@@ -55,12 +55,22 @@ def collect_car_vertices(car, car_up, car_dir, dt, wheel_spin_accum):
         # Suspension compression is computed during physics update and stored on
         # each wheel. Use that value for consistent visualization.
         compression = wheel.compression
-        compression_ratio = max(0.0, min(1.0, compression / wheel.suspension_rest))
-        suspension_length = max(0.05, wheel.suspension_rest - compression)
+        compression_ratio = max(0.0, min(1.0, compression / wheel.suspension_travel))
+        suspension_length = max(0.05, wheel.suspension_travel - compression)
         # Color shocks from green (fully extended) to red (fully compressed)
         # to visualize suspension travel clearly.
         susp_color = [compression_ratio, 1 - compression_ratio, 0.0, 1.0]
-        tire_color = [wheel.slip_ratio, 0.0, 0.0, 1.0] if wheel.is_grounded else list(WHEEL_DEFAULT_COLOR)
+        if wheel.is_grounded:
+            slip = max(0.0, min(1.0, wheel.slip_ratio))
+            base = WHEEL_DEFAULT_COLOR
+            tire_color = [
+                base[0] + (1.0 - base[0]) * slip,
+                base[1] * (1.0 - slip),
+                base[2] * (1.0 - slip),
+                1.0,
+            ]
+        else:
+            tire_color = list(WHEEL_DEFAULT_COLOR)
 
         local_steer = wheel.steer_angle
         local_axle = np.array([math.cos(local_steer), 0, -math.sin(local_steer)])

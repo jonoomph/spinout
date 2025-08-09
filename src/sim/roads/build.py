@@ -315,6 +315,8 @@ def build_road_vertices(
         for p0, p1 in zip(drive_line[:-1], drive_line[1:]):
             a0 = np.array([p0[0], base_height(p0[0], p0[1]) + cfg.DRIVE_LINE_HEIGHT, p0[1]])
             a1 = np.array([p1[0], base_height(p1[0], p1[1]) + cfg.DRIVE_LINE_HEIGHT, p1[1]])
+            if not (np.isfinite(a0).all() and np.isfinite(a1).all()):
+                continue
             seg = a1 - a0
             dir2 = np.array([seg[0], seg[2]], dtype=float)
             L = np.linalg.norm(dir2)
