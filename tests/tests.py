@@ -1,30 +1,29 @@
+"""Simple regression tests for vehicle acceleration and braking."""
+
 import json
 import os
 import sys
 
 import numpy as np
+import pytest
 
+# Allow running tests directly from repository root
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
-from src.physics import Car, Terrain
 
+from environment import Environment
+
+# Target speeds and tolerances for the 0-60/60-0 tests
 TARGET_SPEED_MPS = 60 * 0.44704  # 60 mph to m/s
 SUCCESS_DIFF = 0.75
-VISUALIZE = 0
+VISUALIZE = int(os.environ.get("VISUALIZE", 0))
 
 
-def simulate(car, accel=True):
-    """
-    Run a simple physics simulation and return the elapsed time.
+def simulate(env: Environment, accel: bool = True) -> float:
+    """Run a simple acceleration or braking simulation and return elapsed time."""
 
-    On accel:
-      - Interpolates the last step to hit TARGET_SPEED_MPS exactly.
-
-    On brake:
-      - Stops as soon as the per‑step deceleration stays below a threshold
-        for a few consecutive steps (to ignore tiny post‑stop jitter).
-    """
-    dt = 0.01
-    substeps = 5
+    car = env.car
+    dt = env.dt
+    substeps = env.substeps
     time = 0.0
 
     if accel:
@@ -39,10 +38,9 @@ def simulate(car, accel=True):
         target_speed = 0.0
         speed_fn = lambda: np.dot(car.body.vel, fwd_vector)
 
-        # settings to ignore tiny sliding after full stop
-        decel_threshold = 0.5   # m/s²
-        consec_limit    = 5     # how many consecutive small steps before we break
-        small_count     = 0
+        decel_threshold = 0.5
+        consec_limit = 5
+        small_count = 0
 
     prev_speed = speed_fn()
 
@@ -80,52 +78,41 @@ def simulate(car, accel=True):
     return time
 
 
-def run_test(car_data, visualize=VISUALIZE):
-    """Run acceleration and braking tests on a flat, sufficiently large terrain."""
-    terrain = Terrain(
-        size=800,
-        res=200,
-        height_scale=0,
-        sigma=0,
-        terrain_type="asphalt",
-        color=[0.2, 0.2, 0.2, 1.0],
-    )
-    terrain.heights[:] = 0
+def run_test(car_data, visualize: int = VISUALIZE):
+    """Return measured 0→60 and 60→0 times for ``car_data``."""
 
-    car = Car(terrain, car_data)
-    start = terrain.size / 4
-    # Place the car so the wheels rest on the ground to avoid an initial drop
-    rest_y = (
-        terrain.get_height(start, start)
-        + car.wheels[0].radius
-        + car.wheels[0].suspension_rest
-    )
-    car.body.pos = np.array([start, rest_y, start])
-
-    # Let the suspension settle before the timed tests
-    car.accel = 0
-    car.brake = 1
-    for _ in range(200):
-        car.update(0.01 / 5)
+    idx = CARS.index(car_data)
+    cfg = {"flat": True, "car_index": idx}
+    mode = "eval" if visualize else "train"
+    env = Environment(cfg, mode=mode)
+    env.reset()
 
     if visualize:
-        accel_exp = car_data["tests"]["0_60_mph_accel_s"]
-        brake_exp = car_data["tests"]["60_0_mph_brake_s"]
-        return run_test_visual(car, terrain, accel_exp, brake_exp)
+        return run_test_visual(
+            env,
+            car_data["tests"]["0_60_mph_accel_s"],
+            car_data["tests"]["60_0_mph_brake_s"],
+        )
 
-    accel_time = simulate(car, accel=True)
-
-    # brief coast before braking
+    car = env.car
     car.accel = 0
-    for _ in range(5):
-        car.update(0.002)
+    car.brake = 1
+    for _ in range(200):  # settle suspension
+        car.update(env.dt / env.substeps)
 
-    brake_time = simulate(car, accel=False)
+    accel_time = simulate(env, accel=True)
+
+    car.accel = 0
+    for _ in range(5):  # short coast before braking
+        car.update(env.dt / env.substeps)
+
+    brake_time = simulate(env, accel=False)
     return accel_time, brake_time
 
 
-def run_test_visual(car, terrain, accel_expected, brake_expected):
-    """Visualize the test run while displaying HUD information and timers."""
+def run_test_visual(env: Environment, accel_expected, brake_expected):
+    """Interactive visualisation for manual inspection of test runs."""
+
     import pygame
 
     from src.car import collect_car_vertices
@@ -138,13 +125,12 @@ def run_test_visual(car, terrain, accel_expected, brake_expected):
     pygame.display.set_mode((width, height), pygame.OPENGL | pygame.DOUBLEBUF)
     clock = pygame.time.Clock()
     render_ctx = RenderContext(width, height)
-    render_ctx.set_mode(1)  # solid terrain; road noise shows motion
-    render_ctx.setup_weather('dry', terrain.terrain_type, 'asphalt')
-    t_basic, _ = build_terrain_triangles(terrain)
+    render_ctx.set_mode(1)
+    render_ctx.setup_weather("dry", env.terrain.terrain_type, "asphalt")
+    t_basic, _ = build_terrain_triangles(env.terrain)
     t_vbo = render_ctx.ctx.buffer(t_basic.tobytes())
     t_vao = render_ctx.ctx.vertex_array(render_ctx.prog, t_vbo, "in_vert", "in_color")
     wheel_spin = [0.0] * 4
-    substeps = 5
     font = pygame.font.SysFont(None, 24)
     hud_surf = pygame.Surface((width, height), pygame.SRCALPHA)
     accel_elapsed = 0.0
@@ -153,6 +139,9 @@ def run_test_visual(car, terrain, accel_expected, brake_expected):
     diff_surf_brake = None
 
     def draw(dt):
+        """Render terrain, car and text overlays for the current frame."""
+
+        car = env.car
         car_dir = car.body.rot.rotate(np.array([0, 0, 1]))
         car_up = car.body.rot.rotate(np.array([0, 1, 0]))
         cam_pos = car.body.pos - car_dir * 10 + np.array([0, 3, 0])
@@ -171,9 +160,7 @@ def run_test_visual(car, terrain, accel_expected, brake_expected):
         hud_surf.fill((0, 0, 0, 0))
         speed_mph = np.linalg.norm(car.body.vel) * 2.23694
         text_speed = font.render(
-            f"Speed: {speed_mph:.1f} mph [gear {car.current_gear} @ {int(car.engine_rpm)} RPM]",
-            True,
-            (255, 255, 255, 255),
+            f"Speed: {speed_mph:.1f} mph", True, (255, 255, 255, 255)
         )
         accel_label = f"Accel: {accel_elapsed:.2f}s"
         brake_label = f"Brake: {brake_elapsed:.2f}s"
@@ -185,10 +172,14 @@ def run_test_visual(car, terrain, accel_expected, brake_expected):
         hud_surf.blit(surf_accel, (x_accel, 40))
         hud_surf.blit(surf_brake, (x_brake, 40))
         if diff_surf_accel is not None:
-            x_accel_diff = x_accel + (surf_accel.get_width() - diff_surf_accel.get_width()) / 2
+            x_accel_diff = x_accel + (
+                surf_accel.get_width() - diff_surf_accel.get_width()
+            ) / 2
             hud_surf.blit(diff_surf_accel, (x_accel_diff, 60))
         if diff_surf_brake is not None:
-            x_brake_diff = x_brake + (surf_brake.get_width() - diff_surf_brake.get_width()) / 2
+            x_brake_diff = x_brake + (
+                surf_brake.get_width() - diff_surf_brake.get_width()
+            ) / 2
             hud_surf.blit(diff_surf_brake, (x_brake_diff, 60))
         render_ctx.render_hud(hud_surf)
         pygame.display.set_caption(
@@ -196,59 +187,57 @@ def run_test_visual(car, terrain, accel_expected, brake_expected):
         )
         pygame.display.flip()
 
-    time = 0.0
-    accel_elapsed = 0.0
-    car.accel = 1
-    car.brake = 0
-    while np.linalg.norm(car.body.vel) < TARGET_SPEED_MPS and time < 60:
+    time_elapsed = 0.0
+    env.car.accel = 1
+    env.car.brake = 0
+    while np.linalg.norm(env.car.body.vel) < TARGET_SPEED_MPS and time_elapsed < 60:
         dt = clock.tick(60) / 1000.0
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 pygame.quit()
                 return 0.0, 0.0
-        for _ in range(substeps):
-            car.update(dt / substeps)
+        for _ in range(env.substeps):
+            env.car.update(dt / env.substeps)
         draw(dt)
-        time += dt
-        accel_elapsed = time
-    accel_time = time
+        time_elapsed += dt
+        accel_elapsed = time_elapsed
+    accel_time = time_elapsed
 
     diff_a = accel_time - accel_expected
     color_a = (0, 200, 0) if abs(diff_a) <= SUCCESS_DIFF else (200, 0, 0)
     diff_surf_accel = font.render(f"{diff_a:+.2f}s", True, color_a)
 
-    car.accel = 0
+    env.car.accel = 0
     for _ in range(5):
-        for _ in range(substeps):
-            car.update(0.002 / substeps)
+        for _ in range(env.substeps):
+            env.car.update(0.002 / env.substeps)
         draw(0.002)
 
-    time = 0.0
-    brake_elapsed = 0.0
-    car.brake = 1
-    fwd = car.body.rot.rotate(np.array([0, 0, 1]))
-    prev_fwd = np.dot(car.body.vel, fwd)
-    while prev_fwd > 0 and time < 60:
+    time_elapsed = 0.0
+    env.car.brake = 1
+    fwd = env.car.body.rot.rotate(np.array([0, 0, 1]))
+    prev_fwd = np.dot(env.car.body.vel, fwd)
+    while prev_fwd > 0 and time_elapsed < 60:
         dt = clock.tick(60) / 1000.0
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 pygame.quit()
-                return accel_time, time
-        for _ in range(substeps):
-            car.update(dt / substeps)
-        curr_fwd = np.dot(car.body.vel, fwd)
+                return accel_time, time_elapsed
+        for _ in range(env.substeps):
+            env.car.update(dt / env.substeps)
+        curr_fwd = np.dot(env.car.body.vel, fwd)
         draw(dt)
-        time += dt
-        brake_elapsed = time
+        time_elapsed += dt
+        brake_elapsed = time_elapsed
         if prev_fwd > 0 and curr_fwd <= 0:
             span = abs(curr_fwd - prev_fwd) + 1e-8
             ratio = abs(prev_fwd) / span
-            time -= dt * (1 - ratio)
-            brake_elapsed = time
+            time_elapsed -= dt * (1 - ratio)
+            brake_elapsed = time_elapsed
             draw(0)
             break
         prev_fwd = curr_fwd
-    brake_time = time
+    brake_time = time_elapsed
     diff_b = brake_time - brake_expected
     color_b = (0, 200, 0) if abs(diff_b) <= SUCCESS_DIFF else (200, 0, 0)
     diff_surf_brake = font.render(f"{diff_b:+.2f}s", True, color_b)
@@ -269,10 +258,9 @@ with open(os.path.join(os.path.dirname(__file__), "../data/cars.json")) as f:
     CARS = json.load(f)
 
 
-import pytest
-
-
 def _make_class(car_data, name):
+    """Create a ``pytest`` class for ``car_data``."""
+
     class CarTest:
         @classmethod
         def setup_class(cls):
@@ -290,6 +278,7 @@ def _make_class(car_data, name):
     return CarTest
 
 
+# Dynamically generate a test class for each car configuration
 for car in CARS:
     name = f"{car['make']}_{car['model']}".replace(" ", "_").replace("-", "_")
     globals()[f"Test_{name}"] = _make_class(car, name)
