@@ -20,7 +20,7 @@ class RenderContext:
         self.ctx.blend_equation = moderngl.FUNC_ADD
         self.width = width
         self.height = height
-        from src.shaders import create_shaders
+        from .shaders import create_shaders
         self.prog, self.prog2d, self.prog_lit, self.prog_tex = create_shaders(self.ctx)
         if 'point_size' in self.prog:
             self.prog['point_size'].value = 1.0

@@ -39,9 +39,17 @@ import matplotlib.pyplot as plt
 # Allow running this file directly without installing the package
 import os
 import sys
-if __package__ is None:  # e.g. `python src/roads/plan.py`
-    sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from src.physics import Quaternion
+if __package__ is None:  # e.g. `python src/sim/roads/plan.py`
+    sys.path.append(
+        os.path.dirname(
+            os.path.dirname(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            )
+        )
+    )
+    from src.sim.physics import Quaternion  # type: ignore
+else:
+    from ..physics import Quaternion
 
 # ---------------- Tunables / randomness (all in one place) -----------------
 # Lanes & shoulders
@@ -650,11 +658,17 @@ if __name__ == "__main__":
 
     # Ensure repo root on sys.path when running as script
     if __package__ is None:
-        sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        from physics import Terrain  # type: ignore
-        from roads.build import apply_plan  # type: ignore
+        sys.path.append(
+            os.path.dirname(
+                os.path.dirname(
+                    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+                )
+            )
+        )
+        from src.sim.physics import Terrain  # type: ignore
+        from src.sim.roads.build import apply_plan  # type: ignore
     else:
-        from src.physics import Terrain
+        from ..physics import Terrain
         from .build import apply_plan
 
     rng = np.random.default_rng()

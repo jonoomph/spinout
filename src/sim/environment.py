@@ -21,10 +21,10 @@ from itertools import product
 
 import numpy as np
 
-from src.physics import Terrain, Car
-from src.roads.plan import generate_plan, get_safe_start_position_and_rot
-from src.roads.build import apply_plan
-from src.colors import (
+from .physics import Terrain, Car
+from .roads.plan import generate_plan, get_safe_start_position_and_rot
+from .roads.build import apply_plan
+from .colors import (
     ROAD_ASPHALT_COLOR,
     ROAD_CONCRETE_COLOR,
     ROAD_GRAVEL_COLOR,
@@ -60,7 +60,7 @@ TERRAIN_TYPES = {
 SURFACES = list(product(WEATHER_MODIFIERS, TERRAIN_TYPES))
 
 # Absolute path to bundled data (e.g. car definitions)
-DATA_DIR = Path(__file__).resolve().parent / "data"
+DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
 
 
 # ---------------------------------------------------------------------------
@@ -325,10 +325,10 @@ class Environment:
         # Local imports to avoid pygame dependency in training mode
         import pygame
         import moderngl
-        from src.render import RenderContext
-        from src.terrain import build_terrain_triangles
-        from src.roads.build import build_road_vertices
-        from src.bbmodel import load_bbmodel
+        from .render import RenderContext
+        from .terrain import build_terrain_triangles
+        from .roads.build import build_road_vertices
+        from .bbmodel import load_bbmodel
 
         self._set_status(0.8, "Building meshes...")
 
@@ -375,10 +375,10 @@ class Environment:
     def _render(self, dt: float) -> None:
         import pygame
         import numpy as np
-        from src.car import collect_car_vertices
-        from src.bbmodel import collect_car_model_vertices
-        from src.hud import render_hud
-        from src.utils import compute_mvp
+        from .car import collect_car_vertices
+        from .bbmodel import collect_car_model_vertices
+        from .hud import render_hud
+        from .utils import compute_mvp
 
         car_dir = self.car.body.rot.rotate(np.array([0, 0, 1]))
         car_up_vec = self.car.body.rot.rotate(np.array([0, 1, 0]))

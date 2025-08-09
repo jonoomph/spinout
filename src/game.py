@@ -11,8 +11,8 @@ helper.  The script is intentionally small – all simulation details live in
 import time
 import pygame
 
-from environment import Environment, WIDTH, HEIGHT
-from src.controls import (
+from src.sim.environment import Environment, WIDTH, HEIGHT
+from src.sim.controls import (
     get_controls,
     STEER_MAX,
     ACCEL_MAX,

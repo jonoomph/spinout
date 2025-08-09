@@ -10,7 +10,7 @@ import pytest
 # Allow running tests directly from repository root
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from environment import Environment
+from src.sim.environment import Environment
 
 # Target speeds and tolerances for the 0-60/60-0 tests
 TARGET_SPEED_MPS = 60 * 0.44704  # 60 mph to m/s
@@ -115,10 +115,10 @@ def run_test_visual(env: Environment, accel_expected, brake_expected):
 
     import pygame
 
-    from src.car import collect_car_vertices
-    from src.render import RenderContext
-    from src.terrain import build_terrain_triangles
-    from src.utils import compute_mvp
+    from src.sim.car import collect_car_vertices
+    from src.sim.render import RenderContext
+    from src.sim.terrain import build_terrain_triangles
+    from src.sim.utils import compute_mvp
 
     pygame.init()
     width, height = 800, 600
