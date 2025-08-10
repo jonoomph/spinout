@@ -146,6 +146,7 @@ class PowerTrain:
         self.final_drive = final_drive
         self.is_cvt = len(gear_ratios) == 2
         self.current_gear = 1
+        self.current_ratio = gear_ratios[0] if gear_ratios else 1.0
         self.rpm = 0.0
         # For CVTs target the rpm that provides peak power rather than torque
         self.cvt_power_rpm = max(self.curve, key=lambda x: x[0] * x[1])[0]
@@ -179,6 +180,7 @@ class PowerTrain:
             else:
                 desired = max_ratio
             ratio = max(min(desired, max_ratio), min_ratio)
+            self.current_ratio = ratio
             mid = (max_ratio + min_ratio) / 2
             self.current_gear = 1 if ratio >= mid else 2
         else:
@@ -202,6 +204,7 @@ class PowerTrain:
                 rpm_est = wheel_rpm * current_ratio * self.final_drive
 
             ratio = current_ratio
+            self.current_ratio = ratio
             rpm_est = max(self.idle_rpm, min(rpm_est, self.max_rpm))
             self.rpm = rpm_est
             engine_torque = self._torque_at_rpm(self.rpm)
@@ -322,6 +325,7 @@ class Car:
         final_drive = engine_data.get("final_drive", 1.0)
         stall_rpm = engine_data.get("stall_rpm")
         self.powertrain = PowerTrain(torque_curve, gear_ratios, final_drive, stall_rpm)
+        self.drive_efficiency = engine_data.get("drivetrain_efficiency", 0.05)
         trans = car_data.get("transmission", {})
         self.trans_type = trans.get("type", "auto")
         self.lockup_speed = trans.get("lockup_speed_mps", 5.0)
@@ -486,7 +490,14 @@ class Car:
                 factor = 0.3 if speed < self.lockup_speed else 1.0
             else:
                 factor = 1.0 if (self.brake > 0 or self.accel > 0) else 0.0
-            total_torque = -engine_brake * factor
+            ratio = self.powertrain.current_ratio
+            total_torque = (
+                -engine_brake
+                * ratio
+                * self.powertrain.final_drive
+                * self.drive_efficiency
+                * factor
+            )
         else:
             total_torque = base_torque * self.accel
         self.drive_torque_per_wheel = total_torque / len(driven)
