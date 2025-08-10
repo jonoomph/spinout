@@ -334,7 +334,14 @@ def _generate_bottom_to_top(
 
 
 def _compute_speed_limits(path: List[_vec2], terrain, road_friction: float) -> List[dict]:
-    """Compute speed limits every 100 m based on curvature and slope."""
+    """Compute speed limits every 100 m based on curvature and terrain.
+
+    In addition to horizontal curvature, the calculation now considers the
+    road's vertical profile and cross‑slope (roll).  Steep crests/valleys or a
+    heavily banked surface will therefore lower the suggested speed compared to
+    a flat section of road.  This helps avoid unrealistic recommendations, such
+    as high speeds over sharp hill peaks.
+    """
     path_arr = np.array(path)
     xs = path_arr[:, 0]
     zs = path_arr[:, 1]
@@ -370,15 +377,62 @@ def _compute_speed_limits(path: List[_vec2], terrain, road_friction: float) -> L
 
         seg_heights = heights[idx0:idx1 + 1]
         seg_ds = ds[idx0:idx1]
-        grades = np.abs(np.diff(seg_heights) / (seg_ds + 1e-6))
-        max_grade = float(np.max(grades)) if grades.size else 0.0
 
-        v_mps = math.sqrt(max(road_friction, 0.1) * g * min_radius) if math.isfinite(min_radius) else 100.0
+        # Grade (incline/decline)
+        grades = np.diff(seg_heights) / (seg_ds + 1e-6)
+        max_grade = float(np.max(np.abs(grades))) if grades.size else 0.0
+
+        # Vertical curvature – change in grade along the segment
+        if len(grades) > 1:
+            angles = np.arctan(grades)
+            dtheta = np.diff(angles)
+            ds_mid = (seg_ds[1:] + seg_ds[:-1]) / 2.0
+            kappa_v = np.abs(dtheta) / (ds_mid + 1e-6)
+            max_kappa_v = float(np.max(kappa_v)) if kappa_v.size else 0.0
+        else:
+            max_kappa_v = 0.0
+        min_radius_v = math.inf if max_kappa_v <= 1e-6 else 1.0 / max_kappa_v
+
+        # Cross slope (roll) sampled from terrain normals
+        rolls: List[float] = []
+        for j in range(idx0, idx1):
+            dir_vec = np.array([dx[j], 0.0, dz[j]])
+            norm_dir = np.linalg.norm(dir_vec)
+            if norm_dir <= 1e-6:
+                continue
+            t_unit = dir_vec / norm_dir
+            left = np.array([-t_unit[2], 0.0, t_unit[0]])
+            n = terrain.get_normal(xs[j], zs[j])
+            roll = math.asin(np.clip(np.dot(n, left), -1.0, 1.0))
+            rolls.append(abs(roll))
+        max_roll = max(rolls) if rolls else 0.0
+
+        # Base speed from horizontal and vertical curvature
+        v_mps_h = (
+            math.sqrt(max(road_friction, 0.1) * g * min_radius)
+            if math.isfinite(min_radius)
+            else 40.0
+        )
+        v_mps_v = (
+            math.sqrt(g * min_radius_v)
+            if math.isfinite(min_radius_v)
+            else 40.0
+        )
+        v_mps = min(v_mps_h, v_mps_v)
         v_mph = v_mps * 2.23694
+
+        # Adjust for steep grades
         if max_grade > 0.06:
             v_mph *= 0.7
         elif max_grade > 0.04:
             v_mph *= 0.85
+
+        # Adjust for cross‑slope/roll
+        roll_deg = math.degrees(max_roll)
+        if roll_deg > 12.0:
+            v_mph *= 0.6
+        elif roll_deg > 8.0:
+            v_mph *= 0.8
 
         speed = SPEED_LIMIT_CHOICES[0]
         for lim in SPEED_LIMIT_CHOICES:
