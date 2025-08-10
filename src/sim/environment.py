@@ -227,7 +227,7 @@ class Environment:
             start_z = self.terrain.height / 4
             rest_y = (
                 self.terrain.get_height(start_x, start_z)
-                + self.car.cg_height
+                + self.car.cg_height_m
             )
             self.car.body.pos = np.array([start_x, rest_y, start_z])
         else:
@@ -288,7 +288,7 @@ class Environment:
             ground_h = self.terrain.get_height(start_x, start_z)
             rot = self.car.body.rot
             self.car = Car(self.terrain, car_data)
-            self.car.body.pos = np.array([start_x, ground_h + self.car.cg_height, start_z])
+            self.car.body.pos = np.array([start_x, ground_h + self.car.cg_height_m, start_z])
             self.car.body.rot = rot
         else:
             pos, rot = get_safe_start_position_and_rot(self.terrain, self.rp, 15.0)

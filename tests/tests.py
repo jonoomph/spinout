@@ -258,6 +258,69 @@ with open(os.path.join(os.path.dirname(__file__), "../data/cars.json")) as f:
     CARS = json.load(f)
 
 
+def _coastdown(car_data, lockup_speed, trans_type="auto"):
+    idx = CARS.index(car_data)
+    env = Environment({"flat": True, "car_index": idx})
+    env.reset()
+    car = env.car
+    car.trans_type = trans_type
+    car.lockup_speed = lockup_speed
+    target = 30 * 0.44704
+    while np.linalg.norm(car.body.vel) < target:
+        car.accel = 1
+        for _ in range(env.substeps):
+            car.update(env.dt / env.substeps)
+    car.accel = 0
+    car.brake = 0
+    end_speed = 20 * 0.44704
+    t = 0.0
+    while np.linalg.norm(car.body.vel) > end_speed and t < 60:
+        for _ in range(env.substeps):
+            car.update(env.dt / env.substeps)
+        t += env.dt
+    return t
+
+
+def _downhill_accel(car_data, grade=0.03, duration=10.0):
+    idx = CARS.index(car_data)
+    env = Environment({"flat": True, "car_index": idx})
+    env.reset()
+    car = env.car
+    car.trans_type = "manual"
+    target = 30 * 0.44704
+    while np.linalg.norm(car.body.vel) < target:
+        car.accel = 1
+        for _ in range(env.substeps):
+            car.update(env.dt / env.substeps)
+    car.accel = 0
+    car.brake = 0
+    v0 = np.linalg.norm(car.body.vel)
+    t = 0.0
+    while t < duration:
+        for _ in range(env.substeps):
+            fwd = car.body.rot.rotate(np.array([0, 0, 1]))
+            car.body.apply_force(fwd * car.body.mass * 9.81 * grade, car.body.pos)
+            car.update(env.dt / env.substeps)
+        t += env.dt
+    v1 = np.linalg.norm(car.body.vel)
+    return (v1 - v0) / duration
+
+
+def test_coastdown_locked():
+    t = _coastdown(CARS[1], lockup_speed=5.0, trans_type="auto")
+    assert 10 <= t <= 16
+
+
+def test_coastdown_unlocked():
+    t = _coastdown(CARS[1], lockup_speed=100.0, trans_type="auto")
+    assert 12 <= t <= 22
+
+
+def test_downhill_neutral():
+    a = _downhill_accel(CARS[1], grade=0.05)
+    assert 0.15 <= a <= 0.25
+
+
 def _make_class(car_data, name):
     """Create a ``pytest`` class for ``car_data``."""
 

@@ -2,6 +2,7 @@
 import math
 import numpy as np
 from .colors import CAR_BODY_COLOR, WHEEL_DEFAULT_COLOR, WIND_COLOR
+from .constants import AIR_DENSITY
 
 
 def _wheel_points(offset_pos, axle_dir, v1, v2, angle, radius, num):
@@ -122,7 +123,7 @@ def collect_car_vertices(car, car_up, car_dir, dt, wheel_spin_accum):
     # Wind resistance lines
     vel_mag = np.linalg.norm(car.body.vel)
     if vel_mag > 5:
-        drag_mag = car.drag_coeff * vel_mag**2
+        drag_mag = 0.5 * AIR_DENSITY * car.drag_coeff * car.frontal_area * vel_mag**2
         line_length = min(drag_mag / 100, 5)
         rear_top_left = car.body.pos + car.body.rot.rotate(np.array([half_width, half_height + car.body_offset, -half_length]))
         rear_top_right = car.body.pos + car.body.rot.rotate(np.array([-half_width, half_height + car.body_offset, -half_length]))

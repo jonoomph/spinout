@@ -3,6 +3,7 @@ import math
 import numpy as np
 from scipy.ndimage import gaussian_filter
 from .colors import TERRAIN_DEFAULT_COLOR
+from .constants import AIR_DENSITY
 
 # Maximum discrete input steps shared with ``controls``.
 STEER_MAX = 128
@@ -137,7 +138,7 @@ class Wheel:
 
 
 class PowerTrain:
-    def __init__(self, torque_curve, gear_ratios, final_drive):
+    def __init__(self, torque_curve, gear_ratios, final_drive, stall_rpm=None):
         """Simple powertrain using engine torque curves and gearing."""
         # torque_curve keys come in as strings from JSON, convert and sort
         self.curve = sorted((float(rpm), torque) for rpm, torque in torque_curve.items())
@@ -146,10 +147,13 @@ class PowerTrain:
         self.is_cvt = len(gear_ratios) == 2
         self.current_gear = 1
         self.rpm = 0.0
-        # store rpm for peak torque for CVT target
-        self.peak_rpm = max(self.curve, key=lambda x: x[1])[0]
+        # For CVTs target the rpm that provides peak power rather than torque
+        self.cvt_power_rpm = max(self.curve, key=lambda x: x[0] * x[1])[0]
         self.idle_rpm = self.curve[0][0]
         self.max_rpm = self.curve[-1][0]
+        # stall speed assumption for automatic transmissions
+        default_stall = min(2200, max(1500, self.max_rpm * 0.3))
+        self.stall_rpm = stall_rpm if stall_rpm is not None else default_stall
 
     def _torque_at_rpm(self, rpm):
         if rpm <= self.curve[0][0]:
@@ -162,14 +166,16 @@ class PowerTrain:
                 return t0 + ratio * (t1 - t0)
         return self.curve[-1][1]
 
-    def compute_wheel_torque(self, wheel_speed):
+    def compute_wheel_torque(self, wheel_speed, throttle):
         """Return wheel torque and update current gear and rpm."""
         # wheel_speed is rad/s of the wheels (estimated from vehicle speed)
         if self.is_cvt:
             max_ratio = max(self.gear_ratios)
             min_ratio = min(self.gear_ratios)
             if wheel_speed > 0:
-                desired = (self.peak_rpm * 2 * math.pi / 60) / (wheel_speed * self.final_drive)
+                desired = (
+                    self.cvt_power_rpm * 2 * math.pi / 60
+                ) / (wheel_speed * self.final_drive)
             else:
                 desired = max_ratio
             ratio = max(min(desired, max_ratio), min_ratio)
@@ -179,6 +185,9 @@ class PowerTrain:
             current_ratio = self.gear_ratios[self.current_gear - 1]
             wheel_rpm = wheel_speed * 60 / (2 * math.pi)
             rpm_est = wheel_rpm * current_ratio * self.final_drive
+            # simple stall behaviour: allow engine to rev even at low wheel speed
+            if throttle > 0 and wheel_speed < 5.0 and self.stall_rpm:
+                rpm_est = max(rpm_est, self.stall_rpm)
 
             shift_up = self.max_rpm * 0.9
             shift_down = self.max_rpm * 0.4
@@ -291,19 +300,31 @@ class Car:
         rim_radius = tire["rim_diameter_in"] * 0.0254 / 2
         radius_calc = rim_radius + sidewall
         if "wheel_radius_m" in car_data:
-            if abs(car_data["wheel_radius_m"] - radius_calc) > 0.01:
-                print(f"Warning: wheel radius mismatch for {car_data['model']}")
-        radius = radius_calc
-        self.cg_height = car_data.get("cg_height_m", radius)
+            radius_raw = car_data["wheel_radius_m"]
+            if abs(radius_raw - radius_calc) / radius_calc > 0.02:
+                print(
+                    f"Warning: wheel radius mismatch for {car_data['model']}, using tire-derived value"
+                )
+                radius = radius_calc
+            else:
+                radius = radius_raw
+        else:
+            radius = radius_calc
+        self.cg_height_m = car_data.get("cg_height_m", radius)
         suspension_travel = car_data.get("suspension_travel_m", 0.25)
         brake_info = car_data.get("brakes", {"base_torque_nm": 8000, "front_bias_pct": 65})
         self.brake_base_torque = brake_info.get("base_torque_nm", 8000)
         self.brake_bias = brake_info.get("front_bias_pct", 65)
+        self.ground_clearance = car_data.get("ground_clearance_m", 0.15)
         engine_data = car_data.get("engine", {})
         torque_curve = engine_data.get("torque_curve", {})
         gear_ratios = engine_data.get("gear_ratios", [1.0])
         final_drive = engine_data.get("final_drive", 1.0)
-        self.powertrain = PowerTrain(torque_curve, gear_ratios, final_drive)
+        stall_rpm = engine_data.get("stall_rpm")
+        self.powertrain = PowerTrain(torque_curve, gear_ratios, final_drive, stall_rpm)
+        trans = car_data.get("transmission", {})
+        self.trans_type = trans.get("type", "auto")
+        self.lockup_speed = trans.get("lockup_speed_mps", 5.0)
         self.engine_rpm = 0.0
         self.current_gear = 1
         spring_k_front = car_data["spring_k_N_per_m"]["front"]
@@ -311,10 +332,16 @@ class Car:
         damper_k_front = car_data["damper_k_Ns_per_m"]["front"]
         damper_k_rear = car_data["damper_k_Ns_per_m"]["rear"]
         drag_coeff = car_data["drag_coeff"]
-        self.rolling_resistance = car_data.get("rolling_resistance", 0.015)
+        self.frontal_area = car_data.get("frontal_area_m2", 2.2)
+        rr_data = car_data.get("rolling_resistance", 0.015)
+        if isinstance(rr_data, dict):
+            self.c_rr0 = rr_data.get("c_rr0", 0.015)
+            self.rr_k_v = rr_data.get("k_v", 0.0002)
+        else:
+            self.c_rr0 = rr_data
+            self.rr_k_v = 0.0002
         dimensions = car_data["dimensions_m"]
         weight_distribution = car_data["weight_distribution_pct"]
-        ground_clearance = car_data["ground_clearance_m"]
         drive_type = car_data["drive_type"]
 
         # Optional steering response tuning. ``strength`` blends between
@@ -346,16 +373,18 @@ class Car:
             print(f"Warning: inertia for {car_data['model']} differs by >35%")
         self.dimensions = dimensions
         self.weight_distribution = weight_distribution
-        self.ground_clearance = ground_clearance
         self.drag_coeff = drag_coeff
+        self.driveline_drag = car_data.get("driveline_drag_nm_s", 0.2)
+        self.bearing_drag = car_data.get("bearing_drag_nm_s", 0.07)
+        self.brake_pad_drag = car_data.get("brake_pad_drag_nm", 2.5)
         self.tire_width = tire_width
         self.is_upside_down = False
 
-        # Calculate body_offset for rendering to ensure correct height after compression
+        # Calculate body_offset so the body's geometric centre aligns with the CG
         half_length = dimensions["length"] / 2
         half_width = dimensions["width"] / 2
         half_height = dimensions["height"] / 2
-        self.body_offset = ground_clearance + half_height - self.cg_height
+        self.body_offset = half_height - self.cg_height_m + self.ground_clearance
 
         # Collision points aligned with the rendered box. Include bottom edge
         # midpoints and center to avoid ground clipping when the car rolls.
@@ -380,8 +409,8 @@ class Car:
             np.array([0.0, bottom_y, 0.0]),
         ]
 
-        # Wheel positions with static compression so the body sits at ground clearance
-        wheel_y = -(self.cg_height - radius)
+        # Wheel positions with static compression relative to the CG
+        wheel_y = -(self.cg_height_m - radius)
         g = 9.81
         front_load = mass * g * weight_distribution["front"] / 100 / 2
         rear_load = mass * g * weight_distribution["rear"] / 100 / 2
@@ -408,6 +437,8 @@ class Car:
         self.accel = 0
         self.brake = 0
         self.drive_torque_per_wheel = 0.0
+        engine_brake = engine_data.get("engine_brake", {})
+        self.engine_brake_curve = sorted((float(rpm), torque) for rpm, torque in engine_brake.items())
 
     def apply_inputs(self, steer_steps, accel_steps, brake_steps):
         """Apply discrete control steps to the car.
@@ -446,14 +477,18 @@ class Car:
         # estimate wheel speed from vehicle linear speed for more stable shifting
         speed = np.linalg.norm(self.body.vel)
         wheel_speed = speed / driven[0].radius
-
-        base_torque = self.powertrain.compute_wheel_torque(wheel_speed)
+        base_torque = self.powertrain.compute_wheel_torque(wheel_speed, self.accel)
         self.engine_rpm = self.powertrain.rpm
         self.current_gear = self.powertrain.current_gear
         if self.accel <= 0:
-            self.drive_torque_per_wheel = 0.0
-            return
-        total_torque = base_torque * self.accel
+            engine_brake = self._engine_brake_torque(self.engine_rpm)
+            if self.trans_type == "auto":
+                factor = 0.3 if speed < self.lockup_speed else 1.0
+            else:
+                factor = 1.0 if (self.brake > 0 or self.accel > 0) else 0.0
+            total_torque = -engine_brake * factor
+        else:
+            total_torque = base_torque * self.accel
         self.drive_torque_per_wheel = total_torque / len(driven)
 
     def _build_wheels(
@@ -512,11 +547,11 @@ class Car:
         self.body.apply_force(gravity, self.body.pos)
         speed = np.linalg.norm(self.body.vel)
         if speed:
-            drag = -self.drag_coeff * speed * self.body.vel
+            drag_mag = 0.5 * AIR_DENSITY * self.drag_coeff * self.frontal_area * speed**2
+            drag = -drag_mag * (self.body.vel / speed)
             self.body.apply_force(drag, self.body.pos)
-            rr = -self.rolling_resistance * self.body.mass * 9.81 * (
-                self.body.vel / speed
-            )
+            rr_mag = self.body.mass * 9.81 * (self.c_rr0 + self.rr_k_v * speed)
+            rr = -rr_mag * (self.body.vel / speed)
             self.body.apply_force(rr, self.body.pos)
 
     def _update_wheel(self, wheel, dt, g_front, g_rear):
@@ -609,16 +644,40 @@ class Car:
                 brake_sign = math.copysign(1, wheel.ang_vel)
             elif abs(long_v) > 0.01:
                 brake_sign = math.copysign(1, long_v)
-        bias = self.brake_bias / 100 if wheel.is_front else (1 - self.brake_bias / 100)
-        brake_torque = self.brake_base_torque * bias
-        brake_t = -self.brake * brake_torque * brake_sign if brake_sign else 0
+        front_bias = self.brake_bias / 100
+        base = self.brake_base_torque * (front_bias if wheel.is_front else (1 - front_bias))
+        brake_t = -self.brake * base * brake_sign if brake_sign else 0
         friction_t = 0 if is_static else -long_f * wheel.radius
         if self.brake > 0 and abs(long_v) < 0.3 and wheel.is_grounded:
             wheel.ang_vel = 0
         else:
-            ang_acc = (drive_t + brake_t + friction_t) / 10
+            extra_t = 0.0
+            if wheel.is_driven:
+                extra_t -= self.driveline_drag * wheel.ang_vel
+            extra_t -= self.bearing_drag * wheel.ang_vel
+            pad_sign = 0.0
+            if abs(wheel.ang_vel) > 0.1:
+                pad_sign = math.copysign(1, wheel.ang_vel)
+            elif abs(long_v) > 0.01:
+                pad_sign = math.copysign(1, long_v)
+            pad_t = -self.brake_pad_drag * pad_sign
+            ang_acc = (drive_t + brake_t + friction_t + extra_t + pad_t) / 10
             wheel.ang_vel += ang_acc * dt
         return 1
+
+    def _engine_brake_torque(self, rpm):
+        curve = self.engine_brake_curve
+        if not curve:
+            return 0.0
+        if rpm <= curve[0][0]:
+            return curve[0][1]
+        if rpm >= curve[-1][0]:
+            return curve[-1][1]
+        for (r0, t0), (r1, t1) in zip(curve[:-1], curve[1:]):
+            if r0 <= rpm <= r1:
+                ratio = (rpm - r0) / (r1 - r0)
+                return t0 + ratio * (t1 - t0)
+        return curve[-1][1]
 
     def _handle_collisions(self):
         for point in self.collision_points:

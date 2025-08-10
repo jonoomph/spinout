@@ -1,0 +1,1 @@
+AIR_DENSITY = 1.225
