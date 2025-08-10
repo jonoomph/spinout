@@ -215,7 +215,20 @@ def _generate_bottom_to_top(
 ):
     width = terrain.width
     height = terrain.height
-    x = rng.uniform(0.15 * width, 0.85 * width)
+
+    # Account for full road width (lanes + shoulder) when staying in bounds
+    half_road = 0.5 * lane_width * lanes
+    half_plus_sh = half_road + shoulder
+
+    # Keep some margin from map edges while respecting the road width
+    side_margin = SIDE_MARGIN * width
+    min_map_x = max(side_margin, half_plus_sh)
+    max_map_x = min(width - side_margin, width - half_plus_sh)
+
+    # Initial position constrained by bounds
+    start_min = max(min_map_x, 0.15 * width)
+    start_max = min(max_map_x, 0.85 * width)
+    x = rng.uniform(start_min, start_max)
     y = 0.0
 
     step = 100.0
@@ -233,8 +246,6 @@ def _generate_bottom_to_top(
 
     min_angle = 0.0
     angle_step = np.deg2rad(10)
-    min_map_x = 0.05 * width
-    max_map_x = 0.95 * width
 
     points = [np.array([x, y])]
     print(f"[debug] Start point: ({x:.2f}, {y:.2f})")
@@ -279,8 +290,8 @@ def _generate_bottom_to_top(
                 cs = CubicSpline(ys, xs, bc_type="natural")
                 y_test = np.linspace(max(0, ys[-1] - check_meters), ys[-1], 10)
                 x_test = cs(y_test)
-                if np.any(x_test < 0) or np.any(x_test > width):
-                    continue  # out of bounds
+                if np.any(x_test - half_plus_sh < 0) or np.any(x_test + half_plus_sh > width):
+                    continue  # out of bounds when accounting for road width
 
                 heading_change = _max_tail_heading_change(x_test, y_test, check_meters)
                 if heading_change > max_spline_turn_deg:
