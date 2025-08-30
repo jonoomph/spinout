@@ -135,6 +135,9 @@ class Wheel:
         # Amount of suspension compression used in physics calculations
         # (0 = fully extended, suspension_travel = fully compressed)
         self.compression = 0.0
+        # Flag indicating the suspension has reached its travel limit and
+        # the wheel is "bottomed out" against the chassis
+        self.bottomed = False
 
 
 class PowerTrain:
@@ -390,27 +393,42 @@ class Car:
         half_height = dimensions["height"] / 2
         self.body_offset = half_height - self.cg_height_m + self.ground_clearance
 
-        # Collision points aligned with the rendered box. Include bottom edge
-        # midpoints and center to avoid ground clipping when the car rolls.
+        # Collision points aligned with the rendered box. Include edge
+        # midpoints and center on the roof, floor, and sides so the car does
+        # not clip into the ground when rolling onto its side or roof.
         top_y = half_height + self.body_offset
         bottom_y = -half_height + self.body_offset
+        mid_y = self.body_offset
         self.collision_points = [
             # top corners
             np.array([ half_width,  top_y,  half_length]),
             np.array([-half_width, top_y,  half_length]),
             np.array([ half_width,  top_y, -half_length]),
             np.array([-half_width, top_y, -half_length]),
+            # top edge midpoints and center
+            np.array([0.0,      top_y,  half_length]),
+            np.array([0.0,      top_y, -half_length]),
+            np.array([ half_width, top_y, 0.0]),
+            np.array([-half_width, top_y, 0.0]),
+            np.array([0.0,      top_y, 0.0]),
             # bottom corners
             np.array([ half_width,  bottom_y,  half_length]),
             np.array([-half_width, bottom_y,  half_length]),
             np.array([ half_width,  bottom_y, -half_length]),
             np.array([-half_width, bottom_y, -half_length]),
             # bottom edge midpoints and center
-            np.array([0.0, bottom_y,  half_length]),
-            np.array([0.0, bottom_y, -half_length]),
+            np.array([0.0,      bottom_y,  half_length]),
+            np.array([0.0,      bottom_y, -half_length]),
             np.array([ half_width, bottom_y, 0.0]),
             np.array([-half_width, bottom_y, 0.0]),
-            np.array([0.0, bottom_y, 0.0]),
+            np.array([0.0,      bottom_y, 0.0]),
+            # side centers and edge midpoints
+            np.array([ half_width, mid_y,  half_length]),
+            np.array([ half_width, mid_y, -half_length]),
+            np.array([-half_width, mid_y,  half_length]),
+            np.array([-half_width, mid_y, -half_length]),
+            np.array([ half_width, mid_y, 0.0]),
+            np.array([-half_width, mid_y, 0.0]),
         ]
 
         # Wheel positions with static compression relative to the CG
@@ -577,16 +595,24 @@ class Car:
             wheel.compression = 0.0
             return 0
         ground_h = self.terrain.get_height(pos[0], pos[2])
-        compression = ground_h + wheel.radius - pos[1]
-        wheel.is_grounded = compression > 0 and not self.is_upside_down
-        compression = min(max(0.0, compression), wheel.suspension_travel) if wheel.is_grounded else 0.0
+        raw_comp = ground_h + wheel.radius - pos[1]
+        wheel.is_grounded = raw_comp > 0 and not self.is_upside_down
+        compression = (
+            min(max(0.0, raw_comp), wheel.suspension_travel)
+            if wheel.is_grounded
+            else 0.0
+        )
+        wheel.bottomed = wheel.is_grounded and raw_comp > wheel.suspension_travel
         wheel.compression = compression
         if not wheel.is_grounded:
+            wheel.bottomed = False
             return 0
         rel_pos = pos - self.body.pos
         vel_at = self.body.vel + np.cross(self.body.angvel, rel_pos)
         bump = 0.0
-        if compression > wheel.suspension_travel * 0.9:
+        if wheel.bottomed:
+            bump = wheel.spring_k * 50 * (raw_comp - wheel.suspension_travel)
+        elif compression > wheel.suspension_travel * 0.9:
             bump = wheel.spring_k * 10 * (compression - wheel.suspension_travel * 0.9)
         spring_f = wheel.spring_k * compression + bump
         damper_f = -wheel.damper_k * vel_at[1]
@@ -735,7 +761,11 @@ class Car:
             / 100
             / 2
         )
-        grounded = sum(self._update_wheel(w, dt, g_front, g_rear) for w in self.wheels)
-        if self.is_upside_down or grounded < 2:
+        grounded = 0
+        bottomed = False
+        for w in self.wheels:
+            grounded += self._update_wheel(w, dt, g_front, g_rear)
+            bottomed = bottomed or w.bottomed
+        if self.is_upside_down or grounded < 2 or bottomed:
             self._handle_collisions()
         self.body.update(dt)
