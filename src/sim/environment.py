@@ -38,9 +38,11 @@ from .colors import (
 # ---------------------------------------------------------------------------
 # Constants shared with the original ``game.py`` script.  They are kept here so
 # both the interactive game and the programmatic environment can use the same
-# defaults without duplicating definitions.
+# defaults without duplicating definitions.  ``WIDTH`` and ``HEIGHT`` are
+# populated at runtime based on the current display.
 
-WIDTH, HEIGHT = 1854, 1168
+WIDTH = 0
+HEIGHT = 0
 
 WEATHER_MODIFIERS = {"dry": 1.0, "wet": 0.7}
 
@@ -132,6 +134,10 @@ class Environment:
         self.surface_idx = 0
         self.surface_info = ""
         self.car_info = ""
+
+        # Window dimensions (populated when the renderer initialises)
+        self.width = 0
+        self.height = 0
 
         # Placeholders; the actual world is created on ``reset``
         self.terrain: Optional[Terrain] = None
@@ -329,10 +335,22 @@ class Environment:
 
         self._set_status(0.8, "Building meshes...")
 
-        pygame.display.set_mode((WIDTH, HEIGHT), pygame.OPENGL | pygame.DOUBLEBUF)
+        if not pygame.display.get_init():
+            pygame.display.init()
+        if pygame.display.get_surface():
+            self.width, self.height = pygame.display.get_surface().get_size()
+        else:
+            info = pygame.display.Info()
+            self.width, self.height = info.current_w, info.current_h
+        global WIDTH, HEIGHT
+        WIDTH, HEIGHT = self.width, self.height
+
+        pygame.display.set_mode(
+            (self.width, self.height), pygame.OPENGL | pygame.DOUBLEBUF
+        )
         pygame.display.set_caption("Spinout")
         self.clock = pygame.time.Clock()
-        self.render_ctx = RenderContext(WIDTH, HEIGHT)
+        self.render_ctx = RenderContext(self.width, self.height)
         self.render_ctx.setup_weather(self.weather, self.terrain_type, self.road_type)
 
         # Terrain
@@ -383,7 +401,7 @@ class Environment:
         self.wheel_spin = [0.0] * 4
         self.font_small = pygame.font.SysFont(None, 24)
         self.font_big = pygame.font.SysFont(None, 48)
-        self.hud_surf = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        self.hud_surf = pygame.Surface((self.width, self.height), pygame.SRCALPHA)
 
         # Car model for solid rendering
         car_model = load_bbmodel(DATA_DIR / "car.bbmodel")
@@ -425,7 +443,7 @@ class Environment:
             up_vec = np.cross(right, forward)
             up_vec /= np.linalg.norm(up_vec)
 
-        mvp = compute_mvp(WIDTH, HEIGHT, cam_pos, right, forward, up_vec)
+        mvp = compute_mvp(self.width, self.height, cam_pos, right, forward, up_vec)
         self.render_ctx.set_camera(cam_pos)
         self.render_ctx.set_mode(self.render_mode)
         self.render_ctx.clear()

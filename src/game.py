@@ -11,7 +11,7 @@ helper.  The script is intentionally small – all simulation details live in
 import time
 import pygame
 
-from src.sim.environment import Environment, WIDTH, HEIGHT
+from src.sim.environment import Environment
 from src.sim.controls import (
     get_controls,
     STEER_MAX,
@@ -36,7 +36,9 @@ def show_loading(progress, message, surface, font):
 
 def main() -> None:
     pygame.init()
-    screen = pygame.display.set_mode((WIDTH, HEIGHT))
+    info = pygame.display.Info()
+    width, height = info.current_w, info.current_h
+    screen = pygame.display.set_mode((width, height))
     pygame.display.set_caption("Loading...")
     loading_font = pygame.font.SysFont(None, 48)
 
