@@ -2,6 +2,10 @@ import threading
 from dataclasses import dataclass
 from typing import Dict, Tuple, Optional
 
+import math
+import threading
+
+import numpy as np
 import pygame
 
 from sim.environment import Environment
@@ -21,35 +25,150 @@ class SplashConfig:
     digging through the logic below.
     """
 
-    duration: float = 2.2  # total length of the animation (s)
-    accel_time: float = 0.8  # how long to accelerate before braking (s)
-    accel: float = 12.0  # forward acceleration in m/s^2
-    brake: float = 15.0  # braking deceleration in m/s^2
+    duration: float = 3.2  # total length of the animation (s)
+    accel_time: float = 1.2  # how long to accelerate before braking (s)
+    brake_time: float = 1.0  # braking window (s)
+    coast_time: float = 0.25  # pause between throttle and braking (s)
+    settle_time: float = 0.8  # additional time to let suspension settle (s)
+    throttle: float = 1.0  # throttle input during the acceleration phase
+    brake_strength: float = 0.95  # brake input during the braking phase
+    sim_dt: float = 1 / 240  # physics step used for the logo simulation
     start_offset_px: Optional[float] = None  # how far left the text begins (px)
 
 
-def _shear_surface(surf: pygame.Surface, shear: float) -> Tuple[pygame.Surface, int]:
-    """Return a copy of ``surf`` sheared horizontally.
+@dataclass
+class LogoState:
+    """Captured state of the simulated car projected onto the logo."""
 
-    ``shear`` is the horizontal offset per vertical pixel (i.e. tangent of the
-    shear angle). Positive values lean the top of the surface to the right while
-    keeping the bottom fixed, negative values lean to the left.
-    """
+    time: float
+    distance: float
+    velocity: float
+    pitch: float
+    heave: float
+
+
+class LogoMotion:
+    """Pre-simulate the car motion that drives the splash logo."""
+
+    def __init__(self, config: SplashConfig):
+        self.dt = float(config.sim_dt)
+        self.accel_time = float(config.accel_time)
+        self.brake_time = float(config.brake_time)
+        self.coast_time = float(config.coast_time)
+        self.settle_time = float(config.settle_time)
+        self.throttle = float(config.throttle)
+        self.brake_strength = float(config.brake_strength)
+
+        env = Environment(
+            cfg={"flat": True, "dt": self.dt, "substeps": 5, "seed": 0},
+            mode="train",
+        )
+        env.reset()
+
+        car = env.car
+        assert car is not None  # appease static checkers
+        self._start_pos = car.body.pos.copy()
+        base_compression = np.array([w.compression for w in car.wheels], dtype=float)
+
+        self.states = [self._capture_state(car, 0.0, base_compression)]
+        total_time = (
+            self.accel_time
+            + self.coast_time
+            + self.brake_time
+            + self.settle_time
+        )
+        steps = int(math.ceil(total_time / self.dt))
+        time = 0.0
+        for _ in range(steps):
+            time += self.dt
+            if time <= self.accel_time:
+                car.accel = self.throttle
+                car.brake = 0.0
+            elif time <= self.accel_time + self.coast_time:
+                car.accel = 0.0
+                car.brake = 0.0
+            elif time <= self.accel_time + self.coast_time + self.brake_time:
+                car.accel = 0.0
+                car.brake = self.brake_strength
+            else:
+                car.accel = 0.0
+                car.brake = 0.0
+            car.steer = 0.0
+            car.update(self.dt)
+            self.states.append(self._capture_state(car, time, base_compression))
+
+        extra_steps = 0
+        while extra_steps < 600:
+            last = self.states[-1]
+            if last.velocity < 0.05 and abs(last.heave) < 0.0005:
+                break
+            time += self.dt
+            car.accel = 0.0
+            car.brake = 0.0
+            car.steer = 0.0
+            car.update(self.dt)
+            self.states.append(self._capture_state(car, time, base_compression))
+            extra_steps += 1
+
+        self.duration = self.states[-1].time
+        self.total_distance = max(state.distance for state in self.states)
+        if self.total_distance <= 0:
+            self.total_distance = 1.0
+        self.max_velocity = max(state.velocity for state in self.states)
+        if self.max_velocity <= 0:
+            self.max_velocity = 1.0
+        self._index = 0
+
+    def _capture_state(
+        self,
+        car,
+        time: float,
+        base_compression: np.ndarray,
+    ) -> LogoState:
+        pos = car.body.pos
+        distance = float(pos[2] - self._start_pos[2])
+        velocity = float(np.linalg.norm(car.body.vel))
+        forward = car.body.rot.rotate(np.array([0.0, 0.0, 1.0]))
+        pitch = float(math.atan2(forward[1], forward[2]))
+        compressions = np.array([w.compression for w in car.wheels], dtype=float)
+        heave = float(np.mean(compressions - base_compression))
+        return LogoState(time=time, distance=distance, velocity=velocity, pitch=pitch, heave=heave)
+
+    def sample(self, t: float) -> LogoState:
+        t = max(0.0, min(t, self.duration))
+        while self._index < len(self.states) - 2 and self.states[self._index + 1].time <= t:
+            self._index += 1
+        s0 = self.states[self._index]
+        s1 = self.states[self._index + 1]
+        if t <= s0.time or s0.time == s1.time:
+            return s0
+        alpha = (t - s0.time) / (s1.time - s0.time)
+        return LogoState(
+            time=t,
+            distance=s0.distance + (s1.distance - s0.distance) * alpha,
+            velocity=s0.velocity + (s1.velocity - s0.velocity) * alpha,
+            pitch=s0.pitch + (s1.pitch - s0.pitch) * alpha,
+            heave=s0.heave + (s1.heave - s0.heave) * alpha,
+        )
+
+
+def _shear_surface(surf: pygame.Surface, shear: float) -> Tuple[pygame.Surface, int]:
+    """Return a copy of ``surf`` sheared horizontally, anchored at the base."""
 
     w, h = surf.get_size()
-    offset = int(abs(shear) * h)
-    sheared = pygame.Surface((w + offset, h), pygame.SRCALPHA)
-    if shear >= 0:
-        for y in range(h):
-            line = surf.subsurface((0, y, w, 1))
-            dx = int(shear * (h - y))
-            sheared.blit(line, (dx, y))
-    else:
-        for y in range(h):
-            line = surf.subsurface((0, y, w, 1))
-            dx = int(shear * (h - y))
-            sheared.blit(line, (dx + offset, y))
-    return sheared, offset
+    if h <= 1:
+        return surf.copy(), 0
+    max_offset = abs(shear) * (h - 1)
+    new_width = int(math.ceil(w + max_offset))
+    sheared = pygame.Surface((new_width, h), pygame.SRCALPHA)
+    base_offset = int(round(max_offset)) if shear < 0 else 0
+    for y in range(h):
+        line = surf.subsurface((0, y, w, 1))
+        offset = shear * (h - 1 - y)
+        x = base_offset + int(round(offset))
+        sheared.blit(line, (x, y))
+    bottom_left = base_offset
+    return sheared, bottom_left
 
 
 def _load_environment(progress: Dict[str, float]) -> Tuple[Environment, Dict]:
@@ -73,11 +192,11 @@ def run(screen: pygame.Surface, config: SplashConfig = SplashConfig()) -> Tuple[
     """Render the animated splash screen on ``screen``.
 
     ``Environment.reset`` executes on a background thread while a progress bar
-    fills on the main thread.  Once the environment is ready a simple
-    kinematic model drives the ``SPINOUT`` logo into frame before braking to a
-    stop.  After the animation an overlay is displayed while the renderer
-    initialises, then the ready ``Environment`` and its initial observation are
-    returned.
+    fills on the main thread.  Once the environment is ready a short
+    Spinout simulation drives the ``SPINOUT`` logo into frame before braking to
+    a stop, leaning based on the simulated suspension.  After the animation an
+    overlay is displayed while the renderer initialises, then the ready
+    ``Environment`` and its initial observation are returned.
     """
 
     width, height = screen.get_size()
@@ -117,25 +236,16 @@ def run(screen: pygame.Surface, config: SplashConfig = SplashConfig()) -> Tuple[
 
     threading.Thread(target=env_thread, daemon=True).start()
 
-    splash_duration = config.duration
+    logo_motion = LogoMotion(config)
+    splash_duration = max(config.duration, logo_motion.duration)
     sim_time = 0.0
-    accel_phase = config.accel_time
     anim_started = False
     progress_start = 0.0
-    pos = 0.0  # metres
-    vel = 0.0  # m/s
 
-    # Pre-compute scaling so final position lands at screen centre
-    t1 = accel_phase
-    t2 = max(0.001, splash_duration - accel_phase)
-    v1 = config.accel * t1
-    disp1 = 0.5 * config.accel * t1 * t1
-    disp2 = v1 * t2 - 0.5 * config.brake * t2 * t2
-    total_disp = disp1 + disp2
-    if total_disp <= 0:
-        total_disp = 1.0
     distance_px = width / 2 + start_offset
-    px_per_m = distance_px / total_disp
+    px_per_m = distance_px / logo_motion.total_distance
+    baseline_y = text_rect.bottom
+    vertical_scale = text_rect.height * 3.5
 
     running = True
     while running:
@@ -157,6 +267,7 @@ def run(screen: pygame.Surface, config: SplashConfig = SplashConfig()) -> Tuple[
                 anim_started = True
                 progress_start = progress["value"]
             else:
+                sim_time = min(sim_time + dt, splash_duration)
                 progress["value"] = min(
                     progress_start + (1.0 - progress_start) * (sim_time / splash_duration),
                     1.0,
@@ -179,26 +290,25 @@ def run(screen: pygame.Surface, config: SplashConfig = SplashConfig()) -> Tuple[
 
         # Update animation once loading is finished
         if anim_started:
-            if pos >= total_disp and vel <= 0.0:
-                acc = 0.0
-                vel = 0.0
-                pos = total_disp
-            else:
-                acc = config.accel if sim_time < accel_phase else -config.brake
-                vel += acc * dt
-                pos += vel * dt
-                if pos >= total_disp:
-                    pos = total_disp
-                    vel = 0.0
-            g_force = acc / 9.81
-            shear = max(-0.5, min(0.5, -g_force * 0.3))
-            screen_x = -start_offset + pos * px_per_m
-            sim_time += dt
-
-            skewed, offset = _shear_surface(text_surf, shear)
+            state = logo_motion.sample(sim_time)
+            screen_x = -start_offset + state.distance * px_per_m
+            distance_ratio = max(0.0, min(state.distance / logo_motion.total_distance, 1.0))
+            distance_ease = 1.0 - (1.0 - distance_ratio) ** 3
+            speed_ratio = max(0.0, min(state.velocity / logo_motion.max_velocity, 1.0))
+            scale = 0.55 + 0.45 * distance_ease + 0.15 * speed_ratio
+            scale = max(0.45, min(scale, 1.25))
+            scaled_size = (
+                max(1, int(round(text_rect.width * scale))),
+                max(1, int(round(text_rect.height * scale))),
+            )
+            scaled = pygame.transform.smoothscale(text_surf, scaled_size)
+            shear = max(-0.5, min(0.5, -state.pitch * 12.0))
+            skewed, bottom_left = _shear_surface(scaled, shear)
+            bottom_center = bottom_left + scaled_size[0] / 2
+            baseline = baseline_y + state.heave * vertical_scale
             r = skewed.get_rect()
-            r.centerx = int(screen_x + (offset if shear > 0 else -offset) / 2)
-            r.centery = text_rect.centery
+            r.left = int(round(screen_x - bottom_center))
+            r.bottom = int(round(baseline))
             screen.blit(skewed, r)
 
             if sim_time >= splash_duration and progress["value"] >= 0.999:
