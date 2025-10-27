@@ -1,6 +1,6 @@
 import threading
 from dataclasses import dataclass
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Optional
 
 import pygame
 
@@ -25,7 +25,7 @@ class SplashConfig:
     accel_time: float = 0.8  # how long to accelerate before braking (s)
     accel: float = 12.0  # forward acceleration in m/s^2
     brake: float = 15.0  # braking deceleration in m/s^2
-    start_offset_px: float | None = None  # how far left the text begins (px)
+    start_offset_px: Optional[float] = None  # how far left the text begins (px)
 
 
 def _shear_surface(surf: pygame.Surface, shear: float) -> Tuple[pygame.Surface, int]:

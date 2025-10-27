@@ -2,8 +2,9 @@
 
 
 from __future__ import annotations
+
 import math
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 
 import numpy as np
 from noise import pnoise2
@@ -180,9 +181,9 @@ def build_road_vertices(
     shoulder: float,
     road_height: float,
     cross_pitch: float,
-    ditch_width: float | None = None,
+    ditch_width: Optional[float] = None,
     road_color=cfg.ROAD_COL,
-    drive_line: List[Tuple[float, float]] | None = None,
+    drive_line: Optional[List[Tuple[float, float]]] = None,
     **_: dict,
 ) -> np.ndarray:
     if ditch_width is None:
@@ -340,7 +341,7 @@ def build_speed_sign_vertices(
     lane_width: float,
     lanes: int,
     shoulder: float,
-    speed_limits: List[dict] | None = None,
+    speed_limits: Optional[List[dict]] = None,
 ) -> tuple[np.ndarray, list[dict]]:
     """Return geometry for sign posts and textured sign billboards.
 
@@ -438,7 +439,7 @@ def build_speed_sign_vertices(
     return np.array(post_verts, dtype="f4"), billboards
 
 
-def apply_plan(terrain, path: List[Tuple[float, float]], params: dict, rng: np.random.Generator | None = None) -> None:
+def apply_plan(terrain, path: List[Tuple[float, float]], params: dict, rng: Optional[np.random.Generator] = None) -> None:
     """Stamp the planned road into *terrain* using the stored parameters."""
     if rng is None:
         rng = np.random.default_rng()

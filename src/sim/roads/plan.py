@@ -29,7 +29,7 @@ Improvements in this version:
 from __future__ import annotations
 
 import math
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 
 import numpy as np
 from scipy.ndimage import gaussian_filter1d
@@ -561,7 +561,7 @@ def _generate_drive_line(
 
 def generate_plan(
     terrain,
-    rng: np.random.Generator | None = None,
+    rng: Optional[np.random.Generator] = None,
     road_type: str = "asphalt",
     weather: str = "dry",
     terrain_type: str = "grass",

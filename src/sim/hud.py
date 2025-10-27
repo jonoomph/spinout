@@ -1,5 +1,6 @@
 import pygame
 import math
+from typing import Optional
 
 def render_hud(
     hud_surf: pygame.Surface,
@@ -10,9 +11,9 @@ def render_hud(
     physics_fps: float,
     steer_angle: float,
     car_info: str = "",
-    rpm: float | None = None,
-    gear: int | None = None,
-    surface_info: str | None = None,
+    rpm: Optional[float] = None,
+    gear: Optional[int] = None,
+    surface_info: Optional[str] = None,
     render_mode: int = 0,
     camera_mode: int = 0,
 ) -> None:
