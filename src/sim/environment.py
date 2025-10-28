@@ -167,6 +167,7 @@ class Environment:
             self.road_type = "asphalt"
             self.terrain_type = "asphalt"
             self.precipitation = "none"
+            self.precipitation_strength = 0.0
             self.terrain = Terrain(
                 res=120,
                 height_scale=0,
@@ -182,19 +183,50 @@ class Environment:
             precip_override = self.cfg.get("precipitation")
             if precip_override not in ("none", "rain"):
                 precip_override = None
-            if precip_override is not None:
-                self.precipitation = precip_override
-            else:
-                self.precipitation = "rain" if float(self.rng.random()) < 0.28 else "none"
+            strength_override = self.cfg.get("precipitation_strength")
+            if strength_override is not None:
+                try:
+                    strength_override = float(strength_override)
+                except (TypeError, ValueError):
+                    strength_override = None
+            if strength_override is not None:
+                strength_override = float(np.clip(strength_override, 0.0, 1.0))
+
+            self.precipitation = "none"
+            self.precipitation_strength = 0.0
 
             weather_override = self.cfg.get("weather")
             if weather_override in ("dry", "wet"):
                 self.weather = weather_override
             else:
+                self.weather = "wet" if float(self.rng.random()) < 0.30 else "dry"
+
+            if precip_override is not None:
+                self.precipitation = precip_override
                 if self.precipitation == "rain":
-                    self.weather = "wet"
+                    if strength_override is not None:
+                        self.precipitation_strength = strength_override
+                    else:
+                        self.precipitation_strength = float(self.rng.random())
                 else:
-                    self.weather = self.rng.choice(["dry", "wet"], p=[0.72, 0.28])
+                    self.precipitation_strength = 0.0
+            else:
+                if self.weather == "wet" and float(self.rng.random()) < 0.5:
+                    self.precipitation = "rain"
+                    if strength_override is not None:
+                        self.precipitation_strength = strength_override
+                    else:
+                        self.precipitation_strength = float(self.rng.random())
+                else:
+                    self.precipitation = "none"
+                    self.precipitation_strength = 0.0
+
+            if (
+                self.precipitation == "rain"
+                and self.weather != "wet"
+                and weather_override not in ("dry", "wet")
+            ):
+                self.weather = "wet"
             self.road_type = self.rng.choice(list(ROAD_TYPES), p=[0.7, 0.2, 0.1])
             self.terrain_type = self.rng.choice(
                 list(TERRAIN_TYPES), p=[0.55, 0.15, 0.15, 0.15]
@@ -273,7 +305,13 @@ class Environment:
         self.surface_info = (
             f"{precip_text} {weather.title()} {self.road_type.title()} | {terrain_type.title()}"
         )
-        self.render_ctx.setup_weather(weather, terrain_type, self.road_type, getattr(self, "precipitation", "none"))
+        self.render_ctx.setup_weather(
+            weather,
+            terrain_type,
+            self.road_type,
+            getattr(self, "precipitation", "none"),
+            getattr(self, "precipitation_strength", 0.0),
+        )
 
         self.terrain.terrain_type = terrain_type
         self.terrain.color = t["color"]
@@ -375,6 +413,7 @@ class Environment:
             self.terrain_type,
             self.road_type,
             getattr(self, "precipitation", "none"),
+            getattr(self, "precipitation_strength", 0.0),
         )
 
         # Terrain

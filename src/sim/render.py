@@ -43,9 +43,9 @@ class RenderContext:
         self.road_noise = 0.0
         self.terrain_mode = 0
         self._rng = np.random.default_rng()
-        self.rain_spawn_radius = 28.0
-        self.rain_spawn_height = 22.0
-        self.max_rain_drops = 3400
+        self.rain_spawn_radius = 24.0
+        self.rain_spawn_height = 20.0
+        self.max_rain_drops = 2600
         self.rain_count = 0
         self._rain_time = 0.0
         self.rain_positions = np.zeros((self.max_rain_drops, 3), dtype='f4')
@@ -290,22 +290,30 @@ class RenderContext:
         if not np.any(self._last_camera_pos):
             self._last_camera_pos = self.camera_pos.copy()
 
-    def setup_weather(self, weather, terrain_type, road_type, precipitation="none"):
+    def setup_weather(
+        self,
+        weather,
+        terrain_type,
+        road_type,
+        precipitation="none",
+        rain_strength=0.0,
+    ):
         self.wetness = 1.0 if weather == 'wet' else 0.0
         self.precipitation = precipitation
         self._init_fog_sheets()
 
         if precipitation == "rain":
-            self.rain_intensity = float(np.clip(self._rng.normal(0.7, 0.18), 0.35, 1.0))
+            self.rain_intensity = float(np.clip(rain_strength, 0.0, 1.0))
         else:
             self.rain_intensity = 0.0
-        self.rain_spawn_radius = 18.0 + 20.0 * self.rain_intensity
-        self.rain_spawn_height = 20.0 + 14.0 * self.rain_intensity
+        self.rain_spawn_radius = 16.0 + 18.0 * self.rain_intensity
+        self.rain_spawn_height = 18.0 + 12.0 * self.rain_intensity
         self._configure_rain_population(force=True)
-        self.puddle_strength = max(self.wetness, 0.35 * self.rain_intensity)
+        self.puddle_strength = float(np.clip(self.wetness * self.rain_intensity, 0.0, 1.0))
         self._rain_anchor = self.camera_pos.copy()
         self._rain_anchor_valid = self.rain_count > 0
         self._last_camera_pos = self.camera_pos.copy()
+        self._build_puddle_mesh()
 
         # Sky brightness from _generate_sky() controls base falloff
         sky_brightness = getattr(self, "sky_brightness", 1.0)
@@ -348,10 +356,13 @@ class RenderContext:
 
     def _configure_rain_population(self, force=False):
         density = float(np.clip(self.rain_intensity, 0.0, 1.0))
-        blend = 0.52 + 0.42 * density
-        target = int(self.max_rain_drops * blend)
-        if density > 0.0:
-            target = max(260, target)
+        if density <= 0.02:
+            target = 0
+        else:
+            eased = density ** 0.85
+            blend = 0.35 + 0.50 * eased
+            target = int(self.max_rain_drops * blend)
+            target = max(int(180 * eased), target)
         target = min(target, self.max_rain_drops)
 
         if target == 0:
@@ -601,12 +612,18 @@ class RenderContext:
             return
 
         terrain = self.terrain_ref
+        density = float(np.clip(self.puddle_strength, 0.0, 1.0))
+
         def clear_puddles():
             if self.puddle_vbo is not None:
                 self.puddle_vbo.release()
             self.puddle_vbo = None
             self.puddle_vao = None
             self.puddle_vertices = None
+
+        if density <= 0.01:
+            clear_puddles()
+            return
 
         csx = float(getattr(terrain, 'cell_size_x', 1.0))
         csz = float(getattr(terrain, 'cell_size_z', 1.0))
@@ -642,7 +659,11 @@ class RenderContext:
             valid_cells = np.argwhere(road_mask)
             if valid_cells.size > 0:
                 rng.shuffle(valid_cells)
-                max_sites = min(220, len(valid_cells))
+                max_sites = int(min(220, len(valid_cells)) * density)
+                if density > 0.0:
+                    max_sites = max(1, max_sites)
+                if max_sites <= 0:
+                    valid_cells = np.asarray([], dtype=valid_cells.dtype).reshape(0, 2)
                 neighbour_offsets = [
                     (-2.0, 0.0),
                     (2.0, 0.0),
@@ -654,8 +675,9 @@ class RenderContext:
                     (2.0, -2.0),
                 ]
 
+                max_patch_budget = int(18000 * max(density, 0.15))
                 for ix, iz in valid_cells[: max_sites * 4]:
-                    if len(patches) > 18000:
+                    if max_patch_budget and len(patches) > max_patch_budget:
                         break
                     if ix < 2 or iz < 2 or ix >= res_x - 2 or iz >= res_z - 2:
                         continue
@@ -689,7 +711,9 @@ class RenderContext:
                     neighbour_avg = float(np.mean(neighbours))
                     depth = max(neighbour_avg - h, 0.0) + float(rng.uniform(0.0, 0.03))
 
-                    cluster_count = int(rng.integers(1, 4))
+                    cluster_scale = 0.6 + 0.4 * density
+                    base_clusters = int(rng.integers(1, 4))
+                    cluster_count = max(1, int(round(base_clusters * cluster_scale)))
                     for cluster in range(cluster_count):
                         seed = float(rng.random() + cluster * 0.137)
                         offset_angle = float(rng.uniform(0.0, 2.0 * np.pi))
@@ -787,10 +811,15 @@ class RenderContext:
                 candidate_mask = (depth_map >= depth_thresh) & (slope_map < 0.22)
                 terrain_cells = np.argwhere(candidate_mask)
                 rng.shuffle(terrain_cells)
-                max_sites = min(90, len(terrain_cells))
+                max_sites = int(min(90, len(terrain_cells)) * density)
+                if density > 0.0:
+                    max_sites = max(1, max_sites)
+                if max_sites <= 0:
+                    terrain_cells = np.asarray([], dtype=terrain_cells.dtype).reshape(0, 2)
 
+                max_patch_budget = int(36000 * max(density, 0.15))
                 for ix, iz in terrain_cells[: max_sites * 4]:
-                    if len(patches) > 36000:
+                    if max_patch_budget and len(patches) > max_patch_budget:
                         break
                     if ix < 2 or iz < 2 or ix >= heights.shape[0] - 2 or iz >= heights.shape[1] - 2:
                         continue
@@ -805,7 +834,9 @@ class RenderContext:
                     if too_close(cx, cz, 1.5 + depth * 4.0):
                         continue
 
-                    cluster_count = int(rng.integers(1, 3))
+                    cluster_scale = 0.6 + 0.4 * density
+                    base_clusters = int(rng.integers(1, 3))
+                    cluster_count = max(1, int(round(base_clusters * cluster_scale)))
                     for cluster in range(cluster_count):
                         seed = float(rng.random() + 0.217 * cluster)
                         offset_angle = float(rng.uniform(0.0, 2.0 * np.pi))
@@ -886,7 +917,7 @@ class RenderContext:
 
     def render_weather(self, mvp, dt):
         self._rain_time += dt
-        self.puddle_strength = max(self.wetness, 0.35 * self.rain_intensity)
+        self.puddle_strength = float(np.clip(self.wetness * self.rain_intensity, 0.0, 1.0))
         if dt > 0.0:
             self.camera_velocity = (self.camera_pos - self._last_camera_pos) / max(dt, 1e-3)
         else:
