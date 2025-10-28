@@ -253,8 +253,10 @@ class Terrain:
         self.surface_friction = np.full((self.res_x, self.res_z), friction, dtype=float)
         # Separate map for road friction so terrain choice does not affect roads
         self.road_friction = np.zeros((self.res_x, self.res_z), dtype=float)
+        # Optional road surface geometry used for collision queries
+        self.road_surface = None
 
-    def get_height(self, x, z):
+    def _height_from_grid(self, x, z):
         if x < 0 or x > self.width or z < 0 or z > self.height:
             return float("-inf")
         ix = min(max(int(x / self.cell_size_x), 0), self.res_x - 2)
@@ -268,6 +270,17 @@ class Terrain:
         h0 = h00 * (1 - fx) + h10 * fx
         h1 = h01 * (1 - fx) + h11 * fx
         return h0 * (1 - fz) + h1 * fz
+
+    def get_height(self, x, z, include_roads: bool = True):
+        base = self._height_from_grid(x, z)
+        if not include_roads:
+            return base
+        road_surface = getattr(self, "road_surface", None)
+        if road_surface is not None:
+            road_h = road_surface.height_at(x, z)
+            if road_h is not None:
+                return max(base, road_h)
+        return base
 
     def get_normal(self, x, z):
         dx = 0.1

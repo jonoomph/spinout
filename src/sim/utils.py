@@ -2,13 +2,28 @@
 import math
 import numpy as np
 
+
 def compute_mvp(width, height, camera_pos, camera_right, camera_forward, camera_up):
-    basis = np.column_stack((camera_right, camera_up, camera_forward))
-    view_rot = np.eye(4, dtype='f4')
-    view_rot[:3, :3] = basis.T
-    trans = np.eye(4, dtype='f4')
-    trans[:3, 3] = -camera_pos
-    view = view_rot @ trans
+    r = np.array(camera_right, dtype="f4")
+    u = np.array(camera_up, dtype="f4")
+    f = np.array(camera_forward, dtype="f4")
+
+    def _safe_norm(vec):
+        n = np.linalg.norm(vec)
+        return n if n > 1e-8 else 1.0
+
+    r /= _safe_norm(r)
+    u /= _safe_norm(u)
+    f /= _safe_norm(f)
+
+    view = np.eye(4, dtype="f4")
+    view[0, :3] = r
+    view[1, :3] = u
+    view[2, :3] = -f
+    cam = np.array(camera_pos, dtype="f4")
+    view[0, 3] = -np.dot(r, cam)
+    view[1, 3] = -np.dot(u, cam)
+    view[2, 3] = np.dot(f, cam)
 
     fov_rad = math.radians(60)
     aspect = width / height

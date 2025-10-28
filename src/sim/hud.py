@@ -64,7 +64,7 @@ def render_hud(
 
     # small-text clusters
     mode_names = {0: "Wireframe", 1: "Textured"}
-    cam_names = {0: "Follow Far", 1: "Follow Near", 2: "Driver"}
+    cam_names = {0: "Follow Far", 1: "Follow Near", 2: "Driver", 3: "Free Fly"}
     line_h = font_small.get_height() + 3
 
     # left cluster: FPS, car, surface
@@ -102,7 +102,7 @@ def render_hud(
     hud_surf.blit(surf_mode, rect_mode)
 
     y += line_h
-    cam_txt = f"Camera: {cam_names.get(camera_mode, '?')} (C)"
+    cam_txt = f"Camera: {cam_names.get(camera_mode, '?')} (C/F)"
     surf_cam = font_small.render(cam_txt, True, (255, 255, 255))
     rect_cam = surf_cam.get_rect(topright=(x_right, y))
     hud_surf.blit(surf_cam, rect_cam)

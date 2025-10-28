@@ -4,169 +4,445 @@
 from __future__ import annotations
 
 import math
-from typing import List, Tuple, Optional
+from typing import List, Optional, Tuple
 
 import numpy as np
-from noise import pnoise2
-from scipy.ndimage import gaussian_filter1d, gaussian_filter
-from scipy.interpolate import RectBivariateSpline
 
 from . import plan as cfg
 
-_vec2 = np.ndarray
-def _tangent(path: List[_vec2], i: int) -> _vec2:
-    if i == 0:
-        v = path[1] - path[0]
-    elif i == len(path) - 1:
-        v = path[-1] - path[-2]
-    else:
-        v = path[i + 1] - path[i - 1]
-    n = float(np.linalg.norm(v))
-    return (v / n) if n > 0 else np.array([0.0, 1.0])
-
-
-def _get_height(
-    heights: np.ndarray,
-    cell_x: float,
-    cell_z: float,
-    width: float,
-    height: float,
-    x: float,
-    z: float,
-) -> float:
-    if not (0 <= x <= width and 0 <= z <= height):
-        return 0.0
-    res_x, res_z = heights.shape
-    ix = min(max(0, int(x / cell_x)), res_x - 2)
-    iz = min(max(0, int(z / cell_z)), res_z - 2)
-    fx = (x - ix * cell_x) / cell_x
-    fz = (z - iz * cell_z) / cell_z
-    h00 = heights[ix, iz]
-    h10 = heights[ix + 1, iz]
-    h01 = heights[ix, iz + 1]
-    h11 = heights[ix + 1, iz + 1]
-    return (
-        (1 - fx) * (1 - fz) * h00
-        + fx * (1 - fz) * h10
-        + (1 - fx) * fz * h01
-        + fx * fz * h11
-    )
-
-
 # ---------------------------------------------------------------------------
-# Stamping into the heightmap (deck + *real* ditch)
+# Helpers
 
 
-def _stamp_road(
+_vec2 = np.ndarray
+
+
+def _sigma_curve(t: float, steepness: float) -> float:
+    """Return a 0..1 curve shaped like a logistic sigma."""
+
+    t = float(np.clip(t, 0.0, 1.0))
+    if steepness <= 0.0:
+        return t
+    half = steepness * 0.5
+    exp_pos = math.exp(half)
+    exp_neg = math.exp(-half)
+    # Normalize so curve(0)=0 and curve(1)=1
+    denom = 1.0 + exp_neg
+    start = 1.0 / (1.0 + exp_pos)
+    end = 1.0 / denom
+    val = 1.0 / (1.0 + math.exp(-steepness * (t - 0.5)))
+    return (val - start) / (end - start + 1e-12)
+
+
+def _estimate_required_ditch_width(
     terrain,
-    path: List[_vec2],
-    lane_width: float,
-    lanes: int,
+    base_height,
+    c: np.ndarray,
+    nrm2: np.ndarray,
+    half_road: float,
+    shoulder: float,
+    base_width: float,
+    start_height: float,
+) -> float:
+    """Extend ditch width so the skirt grade stays within bounds."""
+
+    width = max(base_width, 0.0)
+    max_width = base_width + cfg.SKIRT_EXTRA_MAX
+    for _ in range(12):
+        offset = half_road + shoulder + width
+        x = c[0] + nrm2[0] * offset
+        z = c[1] + nrm2[1] * offset
+        terrain_y = base_height(x, z)
+        drop = start_height - terrain_y
+        required = drop / max(cfg.SKIRT_MAX_GRADE, 1e-6)
+        if required <= width + 0.05:
+            break
+        width = min(max_width, max(width + 0.5, required))
+        if width >= max_width - 1e-6:
+            break
+    return max(width, 0.0)
+
+
+def _build_offsets(half_road: float, shoulder: float, ditch_width: float) -> List[float]:
+    """Generate symmetric offsets for the ring mesh."""
+
+    spacing = max(cfg.SKIRT_SAMPLE_SPACING, 0.2)
+    outer = max(half_road + shoulder + ditch_width, spacing)
+    count = max(1, int(math.ceil(outer / spacing)))
+    step = outer / count if count > 0 else spacing
+    offsets_pos = [0.0]
+    for i in range(1, count + 1):
+        offsets_pos.append(min(outer, i * step))
+    required = {0.0, outer}
+    if half_road > 1e-6:
+        required.add(min(outer, half_road))
+    if shoulder > 1e-6:
+        required.add(min(outer, half_road + shoulder))
+    offsets_pos.extend(required)
+    if abs(offsets_pos[-1] - outer) > 1e-6:
+        offsets_pos.append(outer)
+    offsets_pos = sorted(set(round(v, 6) for v in offsets_pos))
+    neg = [-v for v in reversed(offsets_pos[1:])]
+    return neg + offsets_pos
+
+
+def _road_surface_height(
+    terrain,
+    base_height,
+    sample,
+    offset: float,
+    half_road: float,
+    shoulder: float,
+    curb_height: float,
+    cross_pitch: float,
+    ditch_sigma: float,
+    ditch_width: float,
+) -> float:
+    """Compute the road/skirt height for a given lateral offset."""
+
+    c = sample["center"]
+    nrm2 = sample["nrm2"]
+    terrain_y = base_height(c[0] + nrm2[0] * offset, c[1] + nrm2[1] * offset)
+    center_surface = sample["center_surface"]
+    edge_height = center_surface - math.tan(cross_pitch) * half_road
+    deck_drop = math.tan(cross_pitch) * min(abs(offset), half_road)
+    deck_height = center_surface - deck_drop
+    if abs(offset) <= half_road:
+        return deck_height + cfg.ROAD_EPS
+
+    x_rel = abs(offset) - half_road
+    shoulder_start = edge_height
+    ditch_start = edge_height - curb_height
+    cap_drop = min(cfg.ROAD_EPS * 0.6, 0.004)
+    cap_height = deck_height + cfg.ROAD_EPS - cap_drop
+    terrain_min = terrain_y + cfg.SKIRT_EPS
+
+    if shoulder > 1e-6:
+        if x_rel <= shoulder:
+            frac = x_rel / max(shoulder, 1e-6)
+            drop = curb_height * _sigma_curve(frac, cfg.SHOULDER_SIGMA_K)
+            surface = shoulder_start - drop
+            if terrain_min <= cap_height:
+                surface = max(surface, terrain_min)
+            return float(min(surface, cap_height))
+        x_rel -= shoulder
+    else:
+        ditch_start = edge_height - curb_height
+
+    if ditch_width <= 1e-6:
+        surface = ditch_start
+        if terrain_min <= cap_height:
+            surface = max(surface, terrain_min)
+        return float(min(surface, cap_height))
+
+    t = min(x_rel / max(ditch_width, 1e-6), 1.0)
+    blend = _sigma_curve(t, ditch_sigma)
+    target = terrain_y + cfg.SKIRT_EPS
+    height = (1.0 - blend) * ditch_start + blend * target
+    if terrain_min <= cap_height:
+        height = max(height, terrain_min)
+    return float(min(height, cap_height))
+
+
+def _collect_profile(
+    terrain,
+    path_np: list[np.ndarray],
+    half_road: float,
     shoulder: float,
     road_height: float,
-    cross_pitch_rad: float,
+    cross_pitch: float,
     ditch_width: float,
     ditch_depth: float,
-    bump_amp: float,
-    hole_amp: float,
-    noise_f: float,
-    rng: np.random.Generator,
-    road_friction: float,
-) -> None:
-    half_road = 0.5 * lane_width * lanes
-    half_plus_sh = half_road + shoulder
-    total_half = half_plus_sh + ditch_width
+    along_step: float,
+):
+    """Gather per-sample geometry information shared by several builders."""
 
-    cell_x = terrain.cell_size_x
-    cell_z = terrain.cell_size_z
-    width = terrain.width
-    height = terrain.height
-    res_x, res_z = terrain.heights.shape
-    noise_dx = rng.uniform(0, 1000)
-    noise_dz = rng.uniform(0, 1000)
+    def base_height(x: float, z: float) -> float:
+        return float(terrain.get_height(x, z, include_roads=False))
 
-    heights_orig = terrain.heights.copy()
-
-    # Smooth base under centerline, higher sigma for more lanes
-    long_smooth_sigma = np.interp(lanes, [cfg.LANE_COUNT_MIN, cfg.LANE_COUNT_MAX], [cfg.LONG_SMOOTH_SIGMA_MIN, cfg.LONG_SMOOTH_SIGMA_MAX])
-    base_under = np.array(
-        [
-            _get_height(
-                heights_orig, cell_x, cell_z, width, height, p[0], p[1]
-            )
-            for p in path
-        ]
+    curb_height = cfg.CURB_HEIGHT
+    ditch_sigma = float(
+        np.interp(
+            ditch_depth,
+            [cfg.DITCH_DEPTH_MIN, cfg.DITCH_DEPTH_MAX],
+            [cfg.DITCH_SIGMA_MIN, cfg.DITCH_SIGMA_MAX],
+        )
     )
-    base_under_sm = gaussian_filter1d(base_under, long_smooth_sigma)
 
-    for i, c in enumerate(path):
-        tdir = _tangent(path, i)
-        nrm = np.array([-tdir[1], tdir[0]], dtype=float)
+    s_path = [0.0]
+    for p0, p1 in zip(path_np[:-1], path_np[1:]):
+        s_path.append(s_path[-1] + np.linalg.norm(p1 - p0))
 
-        # detect uphill/downhill side by sampling original terrain
-        sample_off = half_plus_sh + 0.3 * ditch_width
-        left_x = c[0] - nrm[0] * sample_off
-        left_z = c[1] - nrm[1] * sample_off
-        right_x = c[0] + nrm[0] * sample_off
-        right_z = c[1] + nrm[1] * sample_off
-        h_left = _get_height(
-            heights_orig, cell_x, cell_z, width, height, left_x, left_z
+    samples: list[dict] = []
+    for ii, (p0, p1) in enumerate(zip(path_np[:-1], path_np[1:])):
+        seg = p1 - p0
+        L = np.linalg.norm(seg)
+        if L < 1e-6:
+            continue
+        dir2 = seg / L
+        nrm2 = np.array([-dir2[1], dir2[0]], dtype=float)
+        nsteps = max(2, int(L / along_step))
+        for k in range(nsteps):
+            frac = k / nsteps
+            c = p0 + dir2 * (L * frac)
+            s_val = s_path[ii] + L * frac
+            samples.append({"center": c, "nrm2": nrm2, "s": s_val, "dir2": dir2})
+    if path_np:
+        last = path_np[-1]
+        if len(path_np) >= 2:
+            prev = path_np[-2]
+            dir_last = last - prev
+            if np.linalg.norm(dir_last) > 1e-6:
+                dir_last /= np.linalg.norm(dir_last)
+        else:
+            dir_last = np.array([0.0, 1.0], dtype=float)
+        nrm_last = np.array([-dir_last[1], dir_last[0]], dtype=float)
+        samples.append({"center": last, "nrm2": nrm_last, "s": s_path[-1], "dir2": dir_last})
+
+    sample_info: list[dict] = []
+    max_ditch_width = 0.0
+    for sample in samples:
+        c = sample["center"]
+        nrm2 = sample["nrm2"]
+        center_ground = base_height(c[0], c[1])
+        center_surface = center_ground + road_height
+        edge_height = center_surface - math.tan(cross_pitch) * half_road
+        start_height = edge_height - curb_height
+        width_needed = _estimate_required_ditch_width(
+            terrain,
+            base_height,
+            c,
+            nrm2,
+            half_road,
+            shoulder,
+            ditch_width,
+            start_height,
         )
-        h_right = _get_height(
-            heights_orig, cell_x, cell_z, width, height, right_x, right_z
+        max_ditch_width = max(max_ditch_width, width_needed)
+        sample_info.append(
+            {
+                "center": c,
+                "nrm2": nrm2,
+                "center_surface": center_surface,
+                "ditch_width": width_needed,
+                "dir2": sample["dir2"],
+                "s": sample["s"],
+            }
         )
-        # lower side gets deeper ditch
-        depth_left = ditch_depth * (1.3 if h_left < h_right else 0.7)
-        depth_right = ditch_depth * (1.3 if h_right < h_left else 0.7)
 
-        # local base
-        base = base_under_sm[i] + road_height
+    offsets = _build_offsets(half_road, shoulder, max_ditch_width)
 
-        # sweep across
-        across = np.arange(-total_half, total_half + cfg.ACROSS_STEP * 0.5, cfg.ACROSS_STEP)
-        for d in across:
-            x = c[0] + nrm[0] * d
-            z = c[1] + nrm[1] * d
-            if not (0 <= x <= width and 0 <= z <= height):
-                continue
-            ix = int(x / cell_x)
-            iz = int(z / cell_z)
-            if ix < 0 or ix >= res_x or iz < 0 or iz >= res_z:
-                continue
-            dist = abs(d)
-            orig = _get_height(
-                heights_orig, cell_x, cell_z, width, height, x, z
-            )
-            if dist <= half_plus_sh:
-                ht = base - math.tan(cross_pitch_rad) * dist
-                n = pnoise2(x * noise_f + noise_dx, z * noise_f + noise_dz)
-                ht += (n * bump_amp) if n >= 0 else (n * hole_amp)
-                terrain.heights[ix, iz] = ht
-                # mark road friction separately so terrain friction doesn't bleed through
-                terrain.road_friction[ix, iz] = road_friction
-            else:
-                t = (dist - half_plus_sh) / max(ditch_width, 1e-6)
-                t = min(max(t, 0.0), 1.0)
-                # cosine bowl (smooth in/out)
-                bowl = 0.5 * (1.0 - math.cos(math.pi * t))  # 0..1
-                side_depth = depth_right if d > 0 else depth_left
-                edge = base - math.tan(cross_pitch_rad) * half_plus_sh
-                ht = (1 - t) * edge + t * orig
-                ht -= side_depth * bowl
-                terrain.heights[ix, iz] = min(orig, ht)
+    return {
+        "samples": samples,
+        "sample_info": sample_info,
+        "offsets": offsets,
+        "ditch_sigma": ditch_sigma,
+        "curb_height": curb_height,
+        "half_road": half_road,
+        "shoulder": shoulder,
+        "cross_pitch": cross_pitch,
+        "along_step": along_step,
+    }
 
-    # Corridor-only smoothing to tidy edges
-    mask = np.zeros_like(terrain.heights, dtype=float)
-    min_cell = min(cell_x, cell_z)
-    pad = int((total_half + 2.0) / min_cell) + 2
-    for p in path:
-        cx = int(p[0] / cell_x)
-        cz = int(p[1] / cell_z)
-        x0 = max(0, cx - pad); x1 = min(res_x, cx + pad + 1)
-        z0 = max(0, cz - pad); z1 = min(res_z, cz + pad + 1)
-        mask[x0:x1, z0:z1] = 1.0
-    smoothed = gaussian_filter(terrain.heights, sigma=5.0, mode="nearest")
-    terrain.heights = smoothed * mask + terrain.heights * (1.0 - mask)
+
+class RoadSurface:
+    """Collision helper that evaluates the procedural road surface."""
+
+    def __init__(self, terrain, profile: dict):
+        self.terrain = terrain
+        self.sample_info = profile.get("sample_info", [])
+        self.half_road = float(profile.get("half_road", 0.0))
+        self.shoulder = float(profile.get("shoulder", 0.0))
+        self.curb_height = float(profile.get("curb_height", cfg.CURB_HEIGHT))
+        self.cross_pitch = float(profile.get("cross_pitch", 0.0))
+        self.ditch_sigma = float(profile.get("ditch_sigma", cfg.DITCH_SIGMA_MIN))
+        self.search_radius = max(float(profile.get("along_step", 0.5)) * 1.6, 1.5)
+        offsets = profile.get("offsets", [0.0])
+        if not offsets:
+            offsets = [0.0]
+        offsets = sorted(float(o) for o in offsets)
+        self.offsets = np.array(offsets, dtype=float)
+        self._max_offset = (
+            float(max(abs(self.offsets[0]), abs(self.offsets[-1])))
+            if len(self.offsets)
+            else 0.0
+        )
+        outer_extent = self._max_offset + cfg.SKIRT_SAMPLE_SPACING
+        self.search_radius = max(self.search_radius, outer_extent + 0.5)
+        self._query_radius = self.search_radius + 0.5
+        self._outer_extent = outer_extent
+        self._outer_limit = outer_extent + 0.5
+        self._query_radius2 = self._query_radius * self._query_radius
+        self._cell_size = max(self.search_radius * 0.5, 1.0)
+        base_mask = terrain.road_friction > 0
+        self._road_mask = base_mask
+        if base_mask.size:
+            dilated = base_mask.copy()
+            for dx in (-1, 0, 1):
+                for dz in (-1, 0, 1):
+                    if dx == 0 and dz == 0:
+                        continue
+                    rolled = np.roll(base_mask, shift=(dx, dz), axis=(0, 1))
+                    if dx > 0:
+                        rolled[:dx, :] = False
+                    elif dx < 0:
+                        rolled[dx:, :] = False
+                    if dz > 0:
+                        rolled[:, :dz] = False
+                    elif dz < 0:
+                        rolled[:, dz:] = False
+                    dilated |= rolled
+        else:
+            dilated = base_mask
+        self._road_mask_any = dilated
+        self._offset_min = float(self.offsets[0]) if len(self.offsets) else 0.0
+        self._offset_max = float(self.offsets[-1]) if len(self.offsets) else 0.0
+        self._uniform_offsets = False
+        self._offset_step = 0.0
+        self._offset_inv_step = 0.0
+        if len(self.offsets) >= 2:
+            diffs = np.diff(self.offsets)
+            first = float(diffs[0])
+            if abs(first) > 1e-9 and np.allclose(diffs, first, atol=1e-6, rtol=1e-6):
+                self._uniform_offsets = True
+                self._offset_step = first
+                self._offset_inv_step = 1.0 / first
+        centers = (
+            np.array([info["center"] for info in self.sample_info], dtype=float)
+            if self.sample_info
+            else np.empty((0, 2), dtype=float)
+        )
+        self._centers = centers
+        self._last_sample: Optional[dict] = None
+        self._reuse_radius2 = (self.search_radius * 0.6) ** 2
+        grid: dict[tuple[int, int], list[int]] = {}
+        if len(centers):
+            for idx, info in enumerate(self.sample_info):
+                cx, cz = info["center"]
+                ix = int(math.floor(cx / self._cell_size))
+                iz = int(math.floor(cz / self._cell_size))
+                grid.setdefault((ix, iz), []).append(idx)
+        self._grid = grid
+
+        def base_height(px: float, pz: float) -> float:
+            return float(self.terrain._height_from_grid(px, pz))
+
+        for info in self.sample_info:
+            heights: list[float] = []
+            for off in self.offsets:
+                h = _road_surface_height(
+                    self.terrain,
+                    base_height,
+                    info,
+                    off,
+                    self.half_road,
+                    self.shoulder,
+                    self.curb_height,
+                    self.cross_pitch,
+                    self.ditch_sigma,
+                    info["ditch_width"],
+                )
+                heights.append(float(h))
+            info["heights"] = np.array(heights, dtype=float)
+
+    def _height_from_sample(self, info: dict, offset: float) -> Optional[float]:
+        offsets = self.offsets
+        heights = info.get("heights")
+        if heights is None or len(offsets) == 0:
+            return None
+        if self._uniform_offsets:
+            if offset <= self._offset_min:
+                return float(heights[0])
+            if offset >= self._offset_max:
+                return float(heights[-1])
+            t = (offset - self._offset_min) * self._offset_inv_step
+            idx = int(math.floor(t))
+            if idx >= len(heights) - 1:
+                return float(heights[-1])
+            frac = t - idx
+            h0 = heights[idx]
+            h1 = heights[idx + 1]
+            return float(h0 + (h1 - h0) * frac)
+
+        if offset <= offsets[0]:
+            return float(heights[0])
+        if offset >= offsets[-1]:
+            return float(heights[-1])
+        idx = int(np.searchsorted(offsets, offset))
+        if idx <= 0:
+            return float(heights[0])
+        if idx >= len(offsets):
+            return float(heights[-1])
+        left_off = offsets[idx - 1]
+        right_off = offsets[idx]
+        span = right_off - left_off
+        if abs(span) < 1e-9:
+            return float(heights[idx])
+        t = (offset - left_off) / span
+        left_h = heights[idx - 1]
+        right_h = heights[idx]
+        road_h = left_h + (right_h - left_h) * t
+        return float(road_h)
+
+    def _candidate_indices(self, x: float, z: float) -> list[int]:
+        if not self._grid:
+            return []
+        cell_size = self._cell_size
+        ix = int(math.floor(x / cell_size))
+        iz = int(math.floor(z / cell_size))
+        candidates: list[int] = []
+        for dx in (-1, 0, 1):
+            for dz in (-1, 0, 1):
+                bucket = self._grid.get((ix + dx, iz + dz))
+                if bucket:
+                    candidates.extend(bucket)
+        return candidates
+
+    def height_at(self, x: float, z: float) -> Optional[float]:
+        if not self.sample_info:
+            return None
+        terrain = self.terrain
+        if x < 0.0 or x > terrain.width or z < 0.0 or z > terrain.height:
+            return None
+
+        ix = min(max(int(x / terrain.cell_size_x), 0), terrain.res_x - 1)
+        iz = min(max(int(z / terrain.cell_size_z), 0), terrain.res_z - 1)
+        road_mask = self._road_mask_any
+        if not road_mask[ix, iz]:
+            return None
+
+        best: Optional[dict] = None
+        best_dist2 = self._query_radius2
+        if self._last_sample is not None:
+            dx_last = x - self._last_sample["center"][0]
+            dz_last = z - self._last_sample["center"][1]
+            dist2_last = dx_last * dx_last + dz_last * dz_last
+            if dist2_last <= self._reuse_radius2:
+                best = self._last_sample
+                best_dist2 = dist2_last
+
+        for idx in self._candidate_indices(x, z):
+            info = self.sample_info[idx]
+            dx = x - info["center"][0]
+            dz = z - info["center"][1]
+            dist2 = dx * dx + dz * dz
+            if dist2 < best_dist2:
+                best = info
+                best_dist2 = dist2
+
+        if best is None:
+            return None
+
+        dx = x - best["center"][0]
+        dz = z - best["center"][1]
+        offset = dx * best["nrm2"][0] + dz * best["nrm2"][1]
+        if self._outer_extent > 0.0 and abs(offset) > self._outer_limit:
+            return None
+        road_h = self._height_from_sample(best, offset)
+        if road_h is None or not math.isfinite(road_h):
+            return None
+        self._last_sample = best
+        return float(road_h)
 
 
 # ---------------------------------------------------------------------------
@@ -182,24 +458,46 @@ def build_road_vertices(
     road_height: float,
     cross_pitch: float,
     ditch_width: Optional[float] = None,
+    ditch_depth: Optional[float] = None,
     road_color=cfg.ROAD_COL,
+    skirt_color=None,
     drive_line: Optional[List[Tuple[float, float]]] = None,
     **_: dict,
-) -> np.ndarray:
+) -> dict[str, np.ndarray]:
     if ditch_width is None:
         ditch_width = cfg.DITCH_WIDTH_MAX
+    if ditch_depth is None:
+        ditch_depth = cfg.DITCH_DEPTH_MIN
 
-    # helper to sample terrain height
+    if skirt_color is None:
+        skirt_color = road_color
+
     def base_height(x: float, z: float) -> float:
-        return float(terrain.get_height(x, z))
+        return float(terrain.get_height(x, z, include_roads=False))
 
     cell = min(terrain.cell_size_x, terrain.cell_size_z)
     along_step = max(cell * cfg.ALONG_STEP_FACTOR, 0.35)
     half_road = 0.5 * lane_width * lanes
     half_plus_sh = half_road + shoulder
 
-    # offsets for road deck
-    gray_offsets = np.linspace(-half_plus_sh, half_plus_sh, max(6, lanes * 3 + 3))
+    path_np = [np.array(p, float) for p in path]
+    profile = _collect_profile(
+        terrain,
+        path_np,
+        half_road,
+        shoulder,
+        road_height,
+        cross_pitch,
+        ditch_width,
+        ditch_depth,
+        along_step,
+    )
+
+    samples = profile["samples"]
+    sample_info = profile["sample_info"]
+    offsets = profile["offsets"]
+    ditch_sigma = profile["ditch_sigma"]
+    curb_height = profile["curb_height"]
 
     # prepare lane-marking definitions
     lines_list: list[tuple[float, list[float], bool]] = []
@@ -224,98 +522,179 @@ def build_road_vertices(
         lines_list.append((off, col, dotted))
     lines_list.append((right_edge_off, right_edge_col, False))
 
-    # dash and line width
     period = cfg.DASH_LENGTH + cfg.GAP_LENGTH
     line_half = cfg.LINE_WIDTH * 0.5
 
-    # convert path and s-path
-    path_np = [np.array(p, float) for p in path]
-    s_path = [0.0]
-    for p0, p1 in zip(path_np[:-1], path_np[1:]):
-        s_path.append(s_path[-1] + np.linalg.norm(p1 - p0))
-
-    # sample centerline into (pos, normal, s)
-    samples: list[tuple[np.ndarray, np.ndarray, float]] = []
-    for ii, (p0, p1) in enumerate(zip(path_np[:-1], path_np[1:])):
-        seg = p1 - p0
-        L = np.linalg.norm(seg)
-        if L < 1e-6:
-            continue
-        dir2 = seg / L
-        nrm2 = np.array([-dir2[1], dir2[0]], dtype=float)
-        nsteps = max(2, int(L / along_step))
-        for k in range(nsteps):
-            frac = k / nsteps
-            c = p0 + dir2 * (L * frac)
-            s_val = s_path[ii] + L * frac
-            samples.append((c, nrm2, s_val))
-    # include final point
-    if len(path_np) >= 2:
-        last = path_np[-1]
-        prev = path_np[-2]
-        dir_last = last - prev
-        if np.linalg.norm(dir_last) > 1e-6:
-            dir_last /= np.linalg.norm(dir_last)
-        nrm_last = np.array([-dir_last[1], dir_last[0]], dtype=float)
-        samples.append((last, nrm_last, s_path[-1]))
-
-    # build deck rings
     rings: list[list[list[float]]] = []
-    for (c, nrm2, _) in samples:
-        ring = []
-        for off in gray_offsets:
-            x = c[0] + nrm2[0] * off
-            z = c[1] + nrm2[1] * off
-            y = base_height(x, z) + cfg.ROAD_EPS
+    ring_heights: list[np.ndarray] = []
+    for info in sample_info:
+        ring: list[list[float]] = []
+        heights: list[float] = []
+        for off in offsets:
+            x = info["center"][0] + info["nrm2"][0] * off
+            z = info["center"][1] + info["nrm2"][1] * off
+            y = _road_surface_height(
+                terrain,
+                base_height,
+                info,
+                off,
+                half_road,
+                shoulder,
+                curb_height,
+                cross_pitch,
+                ditch_sigma,
+                info["ditch_width"],
+            )
             ring.append([x, y, z])
+            heights.append(float(y))
         rings.append(ring)
+        ring_heights.append(np.array(heights, dtype=float))
 
-    verts: list[float] = []
-    def emit_quad(a, b, c, d, col):
-        col_list = list(col)
-        verts.extend(a + col_list); verts.extend(b + col_list); verts.extend(c + col_list)
-        verts.extend(c + col_list); verts.extend(b + col_list); verts.extend(d + col_list)
+    deck_vertices: list[float] = []
+    skirt_vertices: list[float] = []
 
-    # connect deck
+    def emit_quad(bucket: list[float], a, b, c, d, cols):
+        col_a, col_b, col_c, col_d = (list(cols[0]), list(cols[1]), list(cols[2]), list(cols[3]))
+        bucket.extend(a + col_a)
+        bucket.extend(b + col_b)
+        bucket.extend(c + col_c)
+        bucket.extend(c + col_c)
+        bucket.extend(b + col_b)
+        bucket.extend(d + col_d)
+
+    road_col = list(road_color)
+    skirt_col = list(skirt_color)
+    shoulder_col = [
+        float(0.5 * (rc + sc)) for rc, sc in zip(road_col[:3], skirt_col[:3])
+    ]
+    if len(road_col) > 3:
+        shoulder_alpha = float(0.5 * (road_col[3] + skirt_col[3]))
+        shoulder_col.append(shoulder_alpha)
+    else:
+        shoulder_col.append(1.0)
+    if len(shoulder_col) < 4:
+        shoulder_col.extend([1.0] * (4 - len(shoulder_col)))
+    deck_limit = half_road + shoulder + 1e-6
+
     for i in range(len(rings) - 1):
         r0, r1 = rings[i], rings[i + 1]
         for j in range(len(r0) - 1):
-            emit_quad(r0[j], r0[j + 1], r1[j], r1[j + 1], road_color)
+            off_a = abs(offsets[j])
+            off_b = abs(offsets[j + 1])
+            if off_a <= deck_limit or off_b <= deck_limit:
+                col0 = shoulder_col if off_a > half_road + 1e-6 else road_col
+                col1 = shoulder_col if off_b > half_road + 1e-6 else road_col
+                col2 = shoulder_col if off_a > half_road + 1e-6 else road_col
+                col3 = shoulder_col if off_b > half_road + 1e-6 else road_col
+                emit_quad(
+                    deck_vertices,
+                    r0[j],
+                    r0[j + 1],
+                    r1[j],
+                    r1[j + 1],
+                    (col0, col1, col2, col3),
+                )
+            else:
+                emit_quad(
+                    skirt_vertices,
+                    r0[j],
+                    r0[j + 1],
+                    r1[j],
+                    r1[j + 1],
+                    (skirt_col, skirt_col, skirt_col, skirt_col),
+                )
 
-    # lane markings extrusion
+    def _line_height(surface_y: float, offset: float) -> float:
+        return surface_y + cfg.LINE_EPS
+
+    offsets_np = np.array(offsets, dtype=float)
+    uniform_offsets = False
+    offset_min = 0.0
+    offset_inv_step = 0.0
+    if len(offsets_np) >= 2:
+        diffs = np.diff(offsets_np)
+        step = float(diffs[0])
+        if abs(step) > 1e-9 and np.allclose(diffs, step, atol=1e-6, rtol=1e-6):
+            uniform_offsets = True
+            offset_min = float(offsets_np[0])
+            offset_inv_step = 1.0 / step
+
+    def _sample_cached_height(idx: int, offset: float) -> float:
+        heights_arr = ring_heights[idx]
+        if len(heights_arr) == 0:
+            return 0.0
+        if uniform_offsets:
+            if offset <= offsets_np[0]:
+                return float(heights_arr[0])
+            if offset >= offsets_np[-1]:
+                return float(heights_arr[-1])
+            t = (offset - offset_min) * offset_inv_step
+            base_idx = int(math.floor(t))
+            if base_idx >= len(heights_arr) - 1:
+                return float(heights_arr[-1])
+            frac = t - base_idx
+            h0 = heights_arr[base_idx]
+            h1 = heights_arr[base_idx + 1]
+            return float(h0 + (h1 - h0) * frac)
+        return float(np.interp(offset, offsets_np, heights_arr))
+
+    line_vertices: list[float] = []
+    driveline_vertices: list[float] = []
     for off, col, dotted in lines_list:
         prev_pair = None
         prev_emit = False
-        for (c, nrm2, s_val) in samples:
+        for idx, (sample, info) in enumerate(zip(samples, sample_info)):
+            c = sample["center"]
+            nrm2 = sample["nrm2"]
+            s_val = sample["s"]
             emit = True
             if dotted:
                 emit = (s_val % period) < cfg.DASH_LENGTH
             left_off = off - line_half
             right_off = off + line_half
-            a = np.array([
+            left_y = _sample_cached_height(idx, left_off)
+            right_y = _sample_cached_height(idx, right_off)
+            a = [
                 c[0] + nrm2[0] * left_off,
-                base_height(c[0] + nrm2[0] * left_off, c[1] + nrm2[1] * left_off) + cfg.LINE_EPS,
-                c[1] + nrm2[1] * left_off
-            ]).tolist()
-            b = np.array([
+                _line_height(left_y, left_off),
+                c[1] + nrm2[1] * left_off,
+            ]
+            b = [
                 c[0] + nrm2[0] * right_off,
-                base_height(c[0] + nrm2[0] * right_off, c[1] + nrm2[1] * right_off) + cfg.LINE_EPS,
-                c[1] + nrm2[1] * right_off
-            ]).tolist()
+                _line_height(right_y, right_off),
+                c[1] + nrm2[1] * right_off,
+            ]
             this_pair = [a, b]
             if prev_pair is not None and emit and prev_emit:
-                emit_quad(prev_pair[0], prev_pair[1], this_pair[0], this_pair[1], col)
+                emit_quad(
+                    line_vertices,
+                    prev_pair[0],
+                    prev_pair[1],
+                    this_pair[0],
+                    this_pair[1],
+                    (col, col, col, col),
+                )
             prev_pair = this_pair
             prev_emit = emit
 
     # green driveline extrusion
+    road_surface_query: Optional[RoadSurface] = None
     if drive_line:
+        road_surface_query = getattr(terrain, "road_surface", None)
+        if road_surface_query is None:
+            road_surface_query = RoadSurface(terrain, profile)
         half_dl = cfg.DRIVE_LINE_WIDTH * 0.5
         green = [0.0, 1.0, 0.0, 1.0]
         prev_pair = None
         for p0, p1 in zip(drive_line[:-1], drive_line[1:]):
-            a0 = np.array([p0[0], base_height(p0[0], p0[1]) + cfg.DRIVE_LINE_HEIGHT, p0[1]])
-            a1 = np.array([p1[0], base_height(p1[0], p1[1]) + cfg.DRIVE_LINE_HEIGHT, p1[1]])
+            h0 = road_surface_query.height_at(p0[0], p0[1]) if road_surface_query else None
+            h1 = road_surface_query.height_at(p1[0], p1[1]) if road_surface_query else None
+            if h0 is None or h1 is None:
+                continue
+            h0 = h0 + cfg.DRIVE_LINE_HEIGHT
+            h1 = h1 + cfg.DRIVE_LINE_HEIGHT
+            a0 = np.array([p0[0], h0, p0[1]])
+            a1 = np.array([p1[0], h1, p1[1]])
             if not (np.isfinite(a0).all() and np.isfinite(a1).all()):
                 continue
             seg = a1 - a0
@@ -329,10 +708,27 @@ def build_road_vertices(
             right= (a0 - np.array([nrm2[0]*half_dl, 0, nrm2[1]*half_dl])).tolist()
             this_pair = [left, right]
             if prev_pair is not None:
-                emit_quad(prev_pair[0], prev_pair[1], this_pair[0], this_pair[1], green)
+                emit_quad(
+                    driveline_vertices,
+                    prev_pair[0],
+                    prev_pair[1],
+                    this_pair[0],
+                    this_pair[1],
+                    (green, green, green, green),
+                )
             prev_pair = this_pair
 
-    return np.array(verts, dtype="f4")
+    def _to_array(values: list[float]) -> np.ndarray:
+        if not values:
+            return np.zeros(0, dtype="f4")
+        return np.array(values, dtype="f4")
+
+    return {
+        "deck": _to_array(deck_vertices),
+        "skirt": _to_array(skirt_vertices),
+        "lines": _to_array(line_vertices),
+        "driveline": _to_array(driveline_vertices),
+    }
 
 
 def build_speed_sign_vertices(
@@ -440,45 +836,55 @@ def build_speed_sign_vertices(
 
 
 def apply_plan(terrain, path: List[Tuple[float, float]], params: dict, rng: Optional[np.random.Generator] = None) -> None:
-    """Stamp the planned road into *terrain* using the stored parameters."""
-    if rng is None:
-        rng = np.random.default_rng()
-    if cfg.UPSAMPLE_FACTOR > 1:
-        old_res_x = terrain.res_x
-        old_res_z = terrain.res_z
-        old_width = terrain.width
-        old_height = terrain.height
-        new_res_x = (old_res_x - 1) * cfg.UPSAMPLE_FACTOR + 1
-        new_res_z = (old_res_z - 1) * cfg.UPSAMPLE_FACTOR + 1
-        new_cell_x = old_width / (new_res_x - 1)
-        new_cell_z = old_height / (new_res_z - 1)
-        x_old = np.linspace(0, old_width, old_res_x)
-        z_old = np.linspace(0, old_height, old_res_z)
-        x_new = np.linspace(0, old_width, new_res_x)
-        z_new = np.linspace(0, old_height, new_res_z)
-        spline = RectBivariateSpline(x_old, z_old, terrain.heights, kx=3, ky=3)
-        terrain.heights = spline(x_new, z_new)
-        spline_fric = RectBivariateSpline(x_old, z_old, terrain.surface_friction, kx=1, ky=1)
-        terrain.surface_friction = spline_fric(x_new, z_new)
-        spline_road = RectBivariateSpline(x_old, z_old, terrain.road_friction, kx=1, ky=1)
-        terrain.road_friction = spline_road(x_new, z_new)
-        terrain.res_x = new_res_x
-        terrain.res_z = new_res_z
-        terrain.cell_size_x = new_cell_x
-        terrain.cell_size_z = new_cell_z
-    _stamp_road(
+    """Apply non-destructive road data to the terrain."""
+
+    terrain.road_surface = None
+    if not path:
+        return
+
+    road_friction = float(params.get("road_friction", 0.0))
+    if road_friction <= 0.0:
+        return
+
+    lane_width = params.get("lane_width", cfg.LANE_WIDTH_MIN)
+    lanes = params.get("lanes", 1)
+    shoulder = params.get("shoulder", 0.0)
+    road_height = float(params.get("road_height", 0.0))
+    cross_pitch = float(params.get("cross_pitch", 0.0))
+    ditch_width = float(params.get("ditch_width", cfg.DITCH_WIDTH_MAX))
+    ditch_depth = float(params.get("ditch_depth", cfg.DITCH_DEPTH_MIN))
+
+    half_span = 0.5 * lane_width * lanes + shoulder
+    if half_span <= 0.0:
+        return
+
+    cell = min(terrain.cell_size_x, terrain.cell_size_z)
+    along_step = max(cell * cfg.ALONG_STEP_FACTOR, 0.35)
+    offsets = np.linspace(-half_span, half_span, max(6, lanes * 3 + 3))
+    path_np = [np.array(p, float) for p in path]
+
+    profile = _collect_profile(
         terrain,
-        [np.array(p) for p in path],
-        params["lane_width"],
-        params["lanes"],
-        params["shoulder"],
-        params["road_height"],
-        params["cross_pitch"],
-        params["ditch_width"],
-        params["ditch_depth"],
-        params["bump_amp"],
-        params["hole_amp"],
-        params["noise_f"],
-        rng,
-        params.get("road_friction", 1.0),
+        path_np,
+        0.5 * lane_width * lanes,
+        shoulder,
+        road_height,
+        cross_pitch,
+        ditch_width,
+        ditch_depth,
+        along_step,
     )
+
+    for sample in profile["samples"]:
+        c = sample["center"]
+        nrm2 = sample["nrm2"]
+        for off in offsets:
+            x = c[0] + nrm2[0] * off
+            z = c[1] + nrm2[1] * off
+            if x < 0 or x > terrain.width or z < 0 or z > terrain.height:
+                continue
+            ix = min(max(int(x / terrain.cell_size_x), 0), terrain.res_x - 1)
+            iz = min(max(int(z / terrain.cell_size_z), 0), terrain.res_z - 1)
+            terrain.road_friction[ix, iz] = road_friction
+
+    terrain.road_surface = RoadSurface(terrain, profile)

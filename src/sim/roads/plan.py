@@ -70,9 +70,19 @@ DITCH_WIDTH_MAX = 4.0
 DITCH_DEPTH_MIN = 0.25  # m (extra cut below original terrain)
 DITCH_DEPTH_MAX = 1.25
 
-# Road crown above terrain (prevents z-fighting), lane-dependent
-ROAD_HEIGHT_MIN_BY_LANES = {1: 0.5, 2: 0.8, 3: 1.2, 4: 1.6, 5: 2.0, 6: 2.5}  # m min
-ROAD_HEIGHT_MAX_BY_LANES = {1: 1.5, 2: 2.0, 3: 2.5, 4: 3.0, 5: 3.5, 6: 4.0}  # m max
+# Road crown above terrain (prevents z-fighting)
+ROAD_HEIGHT_MIN = 0.0  # m
+ROAD_HEIGHT_MAX = 4.0  # m
+
+# Cross-section shaping for floating roads
+CURB_HEIGHT = 0.18  # m drop from deck into the shoulder
+SHOULDER_SIGMA_K = 6.0  # logistic steepness for curb drop
+DITCH_SIGMA_MIN = 3.0  # min steepness for shallow ditches
+DITCH_SIGMA_MAX = 7.0  # max steepness for deep ditches
+SKIRT_MAX_GRADE = 0.7   # max vertical drop per meter when extending skirt
+SKIRT_EXTRA_MAX = 12.0  # max additional skirt length per side (m)
+SKIRT_SAMPLE_SPACING = 1.0  # spacing used when generating ring offsets (m)
+SKIRT_EPS = 0.005  # keep skirt slightly above terrain while staying below the deck
 
 # Centerline generation (bottom → top bias)
 RESAMPLE_STEP = 5.0          # dense resampling step for stamping (increased for fewer points)
@@ -131,9 +141,9 @@ LINE_WIDTH = 0.15  # m
 DASH_LENGTH = 3.0  # m
 GAP_LENGTH = 9.0   # m
 ROAD_EPS = 0.015    # small offset to prevent z-fighting and ensure mesh above terrain
-LINE_EPS = 0.018    # slightly higher offset for lane markings
+LINE_EPS = 0.03     # extra lift for lane markings to avoid z-fighting
 DRIVE_LINE_WIDTH = 0.35  # m width of green driveline guide
-DRIVE_LINE_HEIGHT = 0.05  # m above road to avoid z-fighting for driveline
+DRIVE_LINE_HEIGHT = 0.07   # m above road surface for driveline helper
 DRIVE_LINE_STEP = 1.0  # m spacing of driveline samples for rendering
 
 # Colors
@@ -577,9 +587,7 @@ def generate_plan(
     shoulder = float(rng.uniform(SHOULDER_MIN, SHOULDER_MAX))
     ditch_width = float(rng.uniform(DITCH_WIDTH_MIN, DITCH_WIDTH_MAX))
     ditch_depth = float(rng.uniform(DITCH_DEPTH_MIN, DITCH_DEPTH_MAX))
-    road_height_min = ROAD_HEIGHT_MIN_BY_LANES.get(lanes, 1.0)
-    road_height_max = ROAD_HEIGHT_MAX_BY_LANES.get(lanes, 3.0)
-    road_height = float(rng.uniform(road_height_min, road_height_max))
+    road_height = float(rng.uniform(ROAD_HEIGHT_MIN, ROAD_HEIGHT_MAX))
     cross_pitch = math.radians(float(rng.uniform(CROSS_PITCH_MIN_DEG, CROSS_PITCH_MAX_DEG)))
 
     noise_f = float(rng.uniform(NOISE_FREQ_MIN, NOISE_FREQ_MAX))

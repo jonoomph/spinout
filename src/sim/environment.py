@@ -23,7 +23,7 @@ import numpy as np
 
 from .physics import Terrain, Car
 from .roads.plan import generate_plan, get_safe_start_position_and_rot
-from .roads.build import apply_plan
+from .roads.build import apply_plan, build_road_vertices, build_speed_sign_vertices
 from .colors import (
     ROAD_ASPHALT_COLOR,
     ROAD_CONCRETE_COLOR,
@@ -134,6 +134,13 @@ class Environment:
         self.surface_idx = 0
         self.surface_info = ""
         self.car_info = ""
+        self._last_car_camera_mode = 0
+        self._free_camera_active = False
+        self.free_cam_pos = np.zeros(3, dtype=float)
+        self.free_cam_yaw = 0.0
+        self.free_cam_pitch = 0.0
+        self.free_cam_speed = 20.0
+        self.road_layers: dict[str, tuple] = {}
 
         # Window dimensions (populated when the renderer initialises)
         self.width = 0
@@ -159,6 +166,11 @@ class Environment:
 
     def _build_world(self) -> None:
         """(Re)create terrain, roads and the player's car."""
+
+        if getattr(self, "_free_camera_active", False):
+            self._exit_free_camera()
+        self.camera_mode = 0
+        self._last_car_camera_mode = 0
 
         self._set_status(0.2, "Generating terrain...")
         if self.cfg.get("flat"):
@@ -321,8 +333,14 @@ class Environment:
         road_mu = ROAD_TYPES[self.road_type]["friction"] * weather_mod
         self.terrain.road_friction[self.terrain.road_friction > 0] = road_mu
         col = np.array(t["color"], dtype="f4")
-        self.t_vertices[:, 3:7] = col
-        self.t_vbo.write(self.t_vertices.tobytes())
+        if hasattr(self, "t_vertices") and getattr(self, "t_vbo", None) is not None:
+            self.t_vertices[:, 3:7] = col
+            self.t_vbo.write(self.t_vertices.tobytes())
+
+        if self.plan:
+            self.plan["skirt_color"] = list(map(float, t["color"]))
+            if getattr(self, "render_ctx", None):
+                self._build_road_layers()
 
     def _cycle_surface(self) -> None:
         self.surface_idx = (self.surface_idx + 1) % len(SURFACES)
@@ -368,6 +386,200 @@ class Environment:
     # ------------------------------------------------------------------
     # Rendering helpers
 
+    def _compute_follow_camera_pose(self, mode: int, car_dir: np.ndarray, car_up_vec: np.ndarray):
+        car_right = self.car.body.rot.rotate(np.array([1, 0, 0]))
+        world_up = np.array([0.0, 1.0, 0.0])
+        if mode == 2:
+            cam_offset = car_up_vec * 0.30 - car_dir * 0.18
+            cam_pos = self.car.body.pos + cam_offset
+            forward = car_dir / (np.linalg.norm(car_dir) + 1e-8)
+            right = car_right / (np.linalg.norm(car_right) + 1e-8)
+            up_vec = car_up_vec / (np.linalg.norm(car_up_vec) + 1e-8)
+        else:
+            cam_dist = 8 if mode == 0 else 4
+            cam_hgt = 2 if mode == 0 else 1.2
+            cam_pos = self.car.body.pos - car_dir * cam_dist + np.array([0.0, cam_hgt, 0.0])
+            forward = self.car.body.pos - cam_pos
+            forward /= np.linalg.norm(forward) + 1e-8
+            right = np.cross(world_up, forward)
+            if np.linalg.norm(right) < 1e-6:
+                right = np.array([1.0, 0.0, 0.0])
+            else:
+                right /= np.linalg.norm(right)
+            up_vec = np.cross(forward, right)
+            up_vec /= np.linalg.norm(up_vec) + 1e-8
+        return cam_pos, forward, right, up_vec
+
+    def _free_camera_axes(self):
+        cos_pitch = math.cos(self.free_cam_pitch)
+        view_dir = np.array(
+            [
+                math.sin(self.free_cam_yaw) * cos_pitch,
+                math.sin(self.free_cam_pitch),
+                math.cos(self.free_cam_yaw) * cos_pitch,
+            ],
+            dtype=float,
+        )
+        norm = np.linalg.norm(view_dir)
+        if norm < 1e-6:
+            view_dir = np.array([0.0, 0.0, 1.0], dtype=float)
+            norm = 1.0
+        view_dir /= norm
+        forward = view_dir
+        world_up = np.array([0.0, 1.0, 0.0], dtype=float)
+        right = np.cross(world_up, forward)
+        right_norm = np.linalg.norm(right)
+        if right_norm < 1e-6:
+            right = np.array([1.0, 0.0, 0.0], dtype=float)
+        else:
+            right /= right_norm
+        up_vec = np.cross(forward, right)
+        up_norm = np.linalg.norm(up_vec)
+        if up_norm < 1e-6:
+            up_vec = np.array([0.0, 1.0, 0.0], dtype=float)
+        else:
+            up_vec /= up_norm
+        return forward, right, up_vec
+
+    def _enter_free_camera(self):
+        if self.car is None:
+            return
+        car_dir = self.car.body.rot.rotate(np.array([0, 0, 1]))
+        car_up_vec = self.car.body.rot.rotate(np.array([0, 1, 0]))
+        cam_pos, forward, _, _ = self._compute_follow_camera_pose(
+            getattr(self, "_last_car_camera_mode", 0), car_dir, car_up_vec
+        )
+        self.free_cam_pos = np.array(cam_pos, dtype=float)
+        forward_norm = forward / (np.linalg.norm(forward) + 1e-8)
+        self.free_cam_yaw = math.atan2(forward_norm[0], forward_norm[2])
+        self.free_cam_pitch = math.asin(float(np.clip(forward_norm[1], -0.999, 0.999)))
+        self._free_camera_active = True
+        if self.mode == "eval":
+            try:
+                import pygame
+
+                if pygame.get_init():
+                    pygame.mouse.set_visible(False)
+                    pygame.event.set_grab(True)
+                    pygame.mouse.get_rel()
+            except Exception:
+                pass
+
+    def _exit_free_camera(self):
+        if not self._free_camera_active:
+            return
+        self._free_camera_active = False
+        if self.mode == "eval":
+            try:
+                import pygame
+
+                if pygame.get_init():
+                    pygame.event.set_grab(False)
+                    pygame.mouse.set_visible(True)
+                    pygame.mouse.get_rel()
+            except Exception:
+                pass
+
+    def _set_camera_mode(self, new_mode: int):
+        new_mode = int(np.clip(new_mode, 0, 3))
+        prev = self.camera_mode
+        if prev == new_mode:
+            return
+        if prev == 3:
+            self._exit_free_camera()
+        if new_mode == 3:
+            if prev != 3:
+                self._last_car_camera_mode = prev
+            self.camera_mode = new_mode
+            self._enter_free_camera()
+        else:
+            self.camera_mode = new_mode
+            self._last_car_camera_mode = new_mode
+
+    def _cycle_camera_mode(self):
+        self._set_camera_mode((self.camera_mode + 1) % 4)
+
+    def _toggle_free_camera(self):
+        if self.camera_mode == 3:
+            self._set_camera_mode(getattr(self, "_last_car_camera_mode", 0))
+        else:
+            self._set_camera_mode(3)
+
+    def _update_free_camera(self, pygame_module):
+        if not self._free_camera_active:
+            return
+        mx, my = pygame_module.mouse.get_rel()
+        sensitivity = 0.0025
+        self.free_cam_yaw += mx * sensitivity
+        self.free_cam_pitch -= my * sensitivity
+        limit = math.radians(89.0)
+        self.free_cam_pitch = float(np.clip(self.free_cam_pitch, -limit, limit))
+
+        move = np.zeros(3, dtype=float)
+        forward, right, _ = self._free_camera_axes()
+        view_forward = forward
+        view_right = right
+        up = np.array([0.0, 1.0, 0.0], dtype=float)
+        keys = pygame_module.key.get_pressed()
+        if keys[pygame_module.K_w]:
+            move += view_forward
+        if keys[pygame_module.K_s]:
+            move -= view_forward
+        if keys[pygame_module.K_a]:
+            move -= view_right
+        if keys[pygame_module.K_d]:
+            move += view_right
+        if keys[pygame_module.K_SPACE]:
+            move += up
+        if keys[pygame_module.K_LSHIFT] or keys[pygame_module.K_RSHIFT]:
+            move -= up
+
+        norm = np.linalg.norm(move)
+        if norm > 1e-6:
+            move /= norm
+            self.free_cam_pos += move * self.free_cam_speed * self.dt
+
+    def _release_road_layers(self) -> None:
+        if not getattr(self, "road_layers", None):
+            return
+        for vao, vbo, _ in self.road_layers.values():
+            try:
+                vbo.release()
+            except Exception:
+                pass
+            try:
+                vao.release()
+            except Exception:
+                pass
+        self.road_layers = {}
+
+    def _build_road_layers(self) -> None:
+        if not getattr(self, "render_ctx", None):
+            return
+        self._release_road_layers()
+        if self.rp is None or not self.plan:
+            return
+
+        road_layers = build_road_vertices(self.terrain, self.rp, **self.plan)
+
+        def _store_layer(name: str, verts: np.ndarray, noise: float = 0.0):
+            if verts.size == 0:
+                return
+            vbo = self.render_ctx.ctx.buffer(verts.tobytes())
+            vao = self.render_ctx.ctx.vertex_array(
+                self.render_ctx.prog, vbo, "in_vert", "in_color"
+            )
+            self.road_layers[name] = (vao, vbo, noise)
+
+        _store_layer("skirt", road_layers.get("skirt", np.zeros(0, dtype="f4")), 0.0)
+        _store_layer(
+            "deck",
+            road_layers.get("deck", np.zeros(0, dtype="f4")),
+            self.render_ctx.road_noise,
+        )
+        _store_layer("lines", road_layers.get("lines", np.zeros(0, dtype="f4")), 0.0)
+        _store_layer("driveline", road_layers.get("driveline", np.zeros(0, dtype="f4")), 0.0)
+
     def init_renderer(self) -> None:
         """Initialise pygame and GPU resources if ``mode`` is ``eval``.
 
@@ -385,7 +597,6 @@ class Environment:
         import moderngl
         from .render import RenderContext
         from .terrain import build_terrain_triangles
-        from .roads.build import build_road_vertices, build_speed_sign_vertices
         from .bbmodel import load_bbmodel
         from .signs.build import generate_speed_limit_sign
 
@@ -407,14 +618,7 @@ class Environment:
         pygame.display.set_caption("Spinout")
         self.clock = pygame.time.Clock()
         self.render_ctx = RenderContext(self.width, self.height)
-        self.render_ctx.set_terrain(self.terrain)
-        self.render_ctx.setup_weather(
-            self.weather,
-            self.terrain_type,
-            self.road_type,
-            getattr(self, "precipitation", "none"),
-            getattr(self, "precipitation_strength", 0.0),
-        )
+        self.render_ctx.setup_weather(self.weather, self.terrain_type, self.road_type)
 
         # Terrain
         tb, _ = build_terrain_triangles(self.terrain)
@@ -425,12 +629,8 @@ class Environment:
         )
 
         # Roads (if any)
+        self._build_road_layers()
         if self.rp is not None and self.plan:
-            road_verts = build_road_vertices(self.terrain, self.rp, **self.plan)
-            self.road_vbo = self.render_ctx.ctx.buffer(road_verts.tobytes())
-            self.road_vao = self.render_ctx.ctx.vertex_array(
-                self.render_ctx.prog, self.road_vbo, "in_vert", "in_color"
-            )
             posts, billboards = build_speed_sign_vertices(
                 self.terrain,
                 self.rp,
@@ -457,7 +657,7 @@ class Environment:
                 )
                 self.sign_billboards.append((vao, tex))
         else:
-            self.road_vao = None
+            self.road_layers = {}
             self.sign_post_vao = None
             self.sign_billboards = []
 
@@ -488,32 +688,31 @@ class Environment:
         car_dir = self.car.body.rot.rotate(np.array([0, 0, 1]))
         car_up_vec = self.car.body.rot.rotate(np.array([0, 1, 0]))
 
-        if self.camera_mode == 2:
-            car_right = self.car.body.rot.rotate(np.array([1, 0, 0]))
-            cam_offset = car_up_vec * 0.30 - car_dir * 0.18
-            cam_pos = self.car.body.pos + cam_offset
-            forward = -car_dir / np.linalg.norm(car_dir)
-            right = car_right / np.linalg.norm(car_right)
-            up_vec = car_up_vec / np.linalg.norm(car_up_vec)
+        if self.camera_mode == 3 and self._free_camera_active:
+            forward, right, up_vec = self._free_camera_axes()
+            cam_pos = self.free_cam_pos
         else:
-            cam_dist = 8 if self.camera_mode == 0 else 4
-            cam_hgt = 2 if self.camera_mode == 0 else 1.2
-            cam_pos = self.car.body.pos - car_dir * cam_dist + np.array([0, cam_hgt, 0])
-            forward = -(self.car.body.pos - cam_pos)
-            forward /= np.linalg.norm(forward)
-            right = np.cross(forward, np.array([0, 1, 0]))
-            right /= np.linalg.norm(right)
-            up_vec = np.cross(right, forward)
-            up_vec /= np.linalg.norm(up_vec)
+            effective_mode = self.camera_mode if self.camera_mode != 3 else getattr(
+                self, "_last_car_camera_mode", 0
+            )
+            cam_pos, forward, right, up_vec = self._compute_follow_camera_pose(
+                effective_mode, car_dir, car_up_vec
+            )
+            if self.camera_mode == 3 and not self._free_camera_active:
+                self.free_cam_pos = np.array(cam_pos, dtype=float)
 
         mvp = compute_mvp(self.width, self.height, cam_pos, right, forward, up_vec)
         self.render_ctx.set_camera(cam_pos)
         self.render_ctx.set_mode(self.render_mode)
         self.render_ctx.clear()
 
-        if self.road_vao is not None:
-            self.render_ctx.render_terrain(self.road_vao, mvp, self.render_ctx.road_noise)
         self.render_ctx.render_terrain(self.t_vao, mvp, self.render_ctx.road_noise)
+        for name in ("skirt", "deck", "lines", "driveline"):
+            layer = self.road_layers.get(name)
+            if not layer:
+                continue
+            vao, _vbo, noise = layer
+            self.render_ctx.render_terrain(vao, mvp, noise)
         if self.sign_post_vao is not None:
             self.render_ctx.render_signs(self.sign_post_vao, mvp)
         for vao, tex in self.sign_billboards:
@@ -617,8 +816,13 @@ class Environment:
                         self.render_mode = 0
                     elif e.key == pygame.K_F2:
                         self.render_mode = 1
+                    elif e.key == pygame.K_ESCAPE:
+                        if self.camera_mode == 3:
+                            self._set_camera_mode(getattr(self, "_last_car_camera_mode", 0))
                     elif e.key == pygame.K_c:
-                        self.camera_mode = (self.camera_mode + 1) % 3
+                        self._cycle_camera_mode()
+                    elif e.key == pygame.K_f:
+                        self._toggle_free_camera()
                     elif e.key == pygame.K_b:
                         self.use_bbmodel = not getattr(self, "use_bbmodel", False)
                     elif e.key == pygame.K_v:
@@ -633,6 +837,9 @@ class Environment:
                         return obs, 0.0, False, False, {"reset": True}
                     elif pygame.K_1 <= e.key <= pygame.K_6:
                         self.switch_car(e.key - pygame.K_1)
+
+            if self.camera_mode == 3:
+                self._update_free_camera(pygame)
 
         self.car.steer = float(action.get("steer", 0.0))
         self.car.accel = float(action.get("accel", 0.0))
