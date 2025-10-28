@@ -166,6 +166,7 @@ class Environment:
             self.weather = "dry"
             self.road_type = "asphalt"
             self.terrain_type = "asphalt"
+            self.precipitation = "none"
             self.terrain = Terrain(
                 res=120,
                 height_scale=0,
@@ -178,7 +179,22 @@ class Environment:
             self.plan = {}
         else:
             # Procedurally generate a random driving environment
-            self.weather = self.rng.choice(["dry", "wet"], p=[0.7, 0.3])
+            precip_override = self.cfg.get("precipitation")
+            if precip_override not in ("none", "rain"):
+                precip_override = None
+            if precip_override is not None:
+                self.precipitation = precip_override
+            else:
+                self.precipitation = "rain" if float(self.rng.random()) < 0.28 else "none"
+
+            weather_override = self.cfg.get("weather")
+            if weather_override in ("dry", "wet"):
+                self.weather = weather_override
+            else:
+                if self.precipitation == "rain":
+                    self.weather = "wet"
+                else:
+                    self.weather = self.rng.choice(["dry", "wet"], p=[0.72, 0.28])
             self.road_type = self.rng.choice(list(ROAD_TYPES), p=[0.7, 0.2, 0.1])
             self.terrain_type = self.rng.choice(
                 list(TERRAIN_TYPES), p=[0.55, 0.15, 0.15, 0.15]
@@ -213,8 +229,9 @@ class Environment:
             self.surface_idx = SURFACES.index((self.weather, self.terrain_type))
         else:
             self.surface_idx = 0
+        precip_text = "Rainy" if getattr(self, "precipitation", "none") == "rain" else "Clear"
         self.surface_info = (
-            f"{self.weather.title()} {self.road_type.title()} | {self.terrain_type.title()}"
+            f"{precip_text} {self.weather.title()} {self.road_type.title()} | {self.terrain_type.title()}"
         )
 
         self._set_status(0.7, "Loading car...")
@@ -252,10 +269,11 @@ class Environment:
         t = TERRAIN_TYPES[terrain_type]
         self.weather = weather
         self.terrain_type = terrain_type
+        precip_text = "Rainy" if getattr(self, "precipitation", "none") == "rain" else "Clear"
         self.surface_info = (
-            f"{weather.title()} {self.road_type.title()} | {terrain_type.title()}"
+            f"{precip_text} {weather.title()} {self.road_type.title()} | {terrain_type.title()}"
         )
-        self.render_ctx.setup_weather(weather, terrain_type, self.road_type)
+        self.render_ctx.setup_weather(weather, terrain_type, self.road_type, getattr(self, "precipitation", "none"))
 
         self.terrain.terrain_type = terrain_type
         self.terrain.color = t["color"]
@@ -351,7 +369,13 @@ class Environment:
         pygame.display.set_caption("Spinout")
         self.clock = pygame.time.Clock()
         self.render_ctx = RenderContext(self.width, self.height)
-        self.render_ctx.setup_weather(self.weather, self.terrain_type, self.road_type)
+        self.render_ctx.set_terrain(self.terrain)
+        self.render_ctx.setup_weather(
+            self.weather,
+            self.terrain_type,
+            self.road_type,
+            getattr(self, "precipitation", "none"),
+        )
 
         # Terrain
         tb, _ = build_terrain_triangles(self.terrain)
