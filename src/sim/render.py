@@ -1017,6 +1017,16 @@ class RenderContext:
             prog['light_dir'].value = tuple(self.light_dir)
         terrain_vao.render(moderngl.TRIANGLES)
 
+    def render_lit_mesh(self, vao, mvp, noise_scale=0.0, terrain_mode=0):
+        prog = vao.program
+        prog['mvp'].write(mvp.T.tobytes())
+        self._apply_common_uniforms(prog)
+        if 'noise_scale' in prog:
+            prog['noise_scale'].value = noise_scale
+        if 'terrain_mode' in prog:
+            prog['terrain_mode'].value = terrain_mode
+        vao.render(moderngl.TRIANGLES)
+
     def cycle_terrain_mode(self):
         self.terrain_mode = (self.terrain_mode + 1) % 4
 

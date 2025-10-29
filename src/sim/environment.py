@@ -34,6 +34,7 @@ from .colors import (
     TERRAIN_DIRT_COLOR,
 )
 from .effects import SkidMarkSystem
+from .buildings import generate_buildings
 
 
 # ---------------------------------------------------------------------------
@@ -192,6 +193,7 @@ class Environment:
             self.terrain.heights[:] = 0
             rp = None
             self.plan = {}
+            self.buildings = {"vertices": np.zeros((0, 10), dtype="f4"), "instances": [], "palette": None, "noise_scale": 0.0}
         else:
             # Procedurally generate a random driving environment
             precip_override = self.cfg.get("precipitation")
@@ -268,6 +270,7 @@ class Environment:
             self._set_status(0.5, "Laying roads...")
             apply_plan(self.terrain, rp, plan, rng=self.rng)
             self.plan = plan
+            self.buildings = generate_buildings(self.terrain, rp, plan, rng=self.rng)
 
         self.rp = rp
 
@@ -667,6 +670,23 @@ class Environment:
             self.sign_post_vao = None
             self.sign_billboards = []
 
+        building_data = getattr(self, "buildings", None)
+        if building_data and building_data.get("vertices") is not None:
+            verts = building_data["vertices"]
+            if isinstance(verts, np.ndarray) and len(verts):
+                self.building_vbo = self.render_ctx.ctx.buffer(verts.tobytes())
+                self.building_vao = self.render_ctx.ctx.vertex_array(
+                    self.render_ctx.prog_lit,
+                    [(self.building_vbo, "3f 3f 4f", "in_vert", "in_normal", "in_color")],
+                )
+                self.building_noise = float(building_data.get("noise_scale", 0.0))
+            else:
+                self.building_vao = None
+                self.building_noise = 0.0
+        else:
+            self.building_vao = None
+            self.building_noise = 0.0
+
         self.wheel_spin = [0.0] * 4
         self.font_small = pygame.font.SysFont(None, 24)
         self.font_big = pygame.font.SysFont(None, 48)
@@ -726,6 +746,8 @@ class Environment:
             self.render_ctx.render_signs(self.sign_post_vao, mvp)
         for vao, tex in self.sign_billboards:
             self.render_ctx.render_billboard(vao, tex, mvp)
+        if getattr(self, "building_vao", None) is not None:
+            self.render_ctx.render_lit_mesh(self.building_vao, mvp, noise_scale=getattr(self, "building_noise", 0.0))
 
         car_lines = collect_car_vertices(self.car, car_up_vec, car_dir, dt, self.wheel_spin)
         if getattr(self, "use_bbmodel", False):
