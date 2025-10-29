@@ -200,6 +200,55 @@ def _estimate_min_radius(path: List[_vec2], min_rad_required: float) -> bool:
     return min_rad >= min_rad_required
 
 
+def _minimum_crown_height(
+    terrain,
+    path: List[Tuple[float, float]],
+    half_road: float,
+    cross_pitch: float,
+) -> float:
+    """Estimate the minimum crown height needed to keep the deck above terrain."""
+
+    if not path or half_road <= 1e-6:
+        return max(ROAD_EPS, 0.0)
+
+    pts = np.asarray(path, dtype=float)
+    tangents = np.zeros_like(pts)
+    count = len(pts)
+    for i in range(count):
+        if count == 1:
+            tdir = np.array([0.0, 1.0], dtype=float)
+        elif i == 0:
+            tdir = pts[1] - pts[0]
+        elif i == count - 1:
+            tdir = pts[-1] - pts[-2]
+        else:
+            tdir = pts[i + 1] - pts[i - 1]
+        norm = np.linalg.norm(tdir)
+        if norm <= 1e-6:
+            tdir = np.array([0.0, 1.0], dtype=float)
+        else:
+            tdir = tdir / norm
+        tangents[i] = tdir
+
+    deck_drop = math.tan(abs(cross_pitch)) * half_road
+    clearance = ROAD_EPS + 0.02
+    required = deck_drop + clearance
+
+    for pt, tdir in zip(pts, tangents):
+        center_ground = float(terrain.get_height(pt[0], pt[1], include_roads=False))
+        nrm = np.array([-tdir[1], tdir[0]], dtype=float)
+        max_delta = 0.0
+        for side in (-1.0, 1.0):
+            edge = pt + nrm * (half_road * side)
+            edge_ground = float(terrain.get_height(edge[0], edge[1], include_roads=False))
+            if not math.isfinite(edge_ground):
+                continue
+            max_delta = max(max_delta, edge_ground - center_ground)
+        required = max(required, deck_drop + max(0.0, max_delta) + clearance)
+
+    return float(required)
+
+
 def _max_tail_heading_change(xs, ys, check_meters=300.0):
     """Return max heading change (deg) in the last `check_meters` section of the spline."""
     pts = np.column_stack([xs, ys])
@@ -589,6 +638,7 @@ def generate_plan(
     ditch_depth = float(rng.uniform(DITCH_DEPTH_MIN, DITCH_DEPTH_MAX))
     road_height = float(rng.uniform(ROAD_HEIGHT_MIN, ROAD_HEIGHT_MAX))
     cross_pitch = math.radians(float(rng.uniform(CROSS_PITCH_MIN_DEG, CROSS_PITCH_MAX_DEG)))
+    half_road = 0.5 * lane_width * lanes
 
     noise_f = float(rng.uniform(NOISE_FREQ_MIN, NOISE_FREQ_MAX))
     bump_amp = float(rng.uniform(0.0, BUMP_MAX))
@@ -601,6 +651,11 @@ def generate_plan(
         bump_amp *= 0.25  # holey, few bumps
 
     path = _generate_bottom_to_top(terrain, rng, lanes, lane_width, shoulder)
+
+    # Ensure the crowned road surface clears the surrounding terrain across its width.
+    min_required_height = _minimum_crown_height(terrain, path, half_road, cross_pitch)
+    if road_height < min_required_height:
+        road_height = min_required_height
 
     # Determine speed limits and drive line before returning
     speed_limits = _compute_speed_limits(path, terrain, road_friction)
