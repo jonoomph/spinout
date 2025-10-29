@@ -279,7 +279,7 @@ class Terrain:
         if road_surface is not None:
             road_h = road_surface.height_at(x, z)
             if road_h is not None:
-                return max(base, road_h)
+                return float(road_h)
         return base
 
     def get_normal(self, x, z):

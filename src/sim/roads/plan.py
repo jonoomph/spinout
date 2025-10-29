@@ -130,6 +130,10 @@ PATH_SMOOTH_SIGMA_MAX = 20.0  # higher for more lanes
 LONG_SMOOTH_SIGMA_MIN = 100.0
 LONG_SMOOTH_SIGMA_MAX = 300.0  # higher for smoother longitudinal (in dense points units)
 
+# Collision profile smoothing along the road centreline (in meters)
+ROAD_PROFILE_SMOOTH_MIN = 4.0
+ROAD_PROFILE_SMOOTH_MAX = 12.0
+
 # Heightmap upsampling for higher resolution near roads
 UPSAMPLE_FACTOR = 4  # Increase resolution by this factor for better detail
 

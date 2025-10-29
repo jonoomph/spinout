@@ -7,6 +7,7 @@ import math
 from typing import List, Optional, Tuple
 
 import numpy as np
+from scipy.ndimage import gaussian_filter1d
 
 from . import plan as cfg
 
@@ -154,6 +155,7 @@ def _collect_profile(
     ditch_width: float,
     ditch_depth: float,
     along_step: float,
+    smooth_span: float,
 ):
     """Gather per-sample geometry information shared by several builders."""
 
@@ -200,12 +202,56 @@ def _collect_profile(
         samples.append({"center": last, "nrm2": nrm_last, "s": s_path[-1], "dir2": dir_last})
 
     sample_info: list[dict] = []
-    max_ditch_width = 0.0
+    raw_heights: list[float] = []
+    s_values: list[float] = []
     for sample in samples:
         c = sample["center"]
         nrm2 = sample["nrm2"]
-        center_ground = base_height(c[0], c[1])
-        center_surface = center_ground + road_height
+        ground = float(base_height(c[0], c[1]))
+        raw_heights.append(ground)
+        s_values.append(float(sample["s"]))
+        sample_info.append(
+            {
+                "center": c,
+                "nrm2": nrm2,
+                "dir2": sample["dir2"],
+                "s": sample["s"],
+            }
+        )
+
+    max_ditch_width = 0.0
+    if sample_info:
+        heights_arr = np.array(raw_heights, dtype=float)
+        if len(heights_arr) >= 2 and smooth_span > 1e-6:
+            s_arr = np.array(s_values, dtype=float)
+            diffs = np.diff(s_arr)
+            valid = diffs[diffs > 1e-6]
+            if valid.size:
+                mean_step = float(np.mean(valid))
+            else:
+                mean_step = float(along_step)
+            step = max(mean_step, float(along_step), 1e-3)
+            sigma_samples = smooth_span / step
+            if sigma_samples > 1e-3:
+                smooth_heights = gaussian_filter1d(
+                    heights_arr, sigma=sigma_samples, mode="nearest"
+                )
+            else:
+                smooth_heights = heights_arr
+        else:
+            smooth_heights = heights_arr
+
+        if heights_arr.size:
+            lift = float(np.max(heights_arr - smooth_heights))
+            if lift > 0.0:
+                smooth_heights = smooth_heights + lift
+
+    for idx, info in enumerate(sample_info):
+        center_surface = float(smooth_heights[idx] + road_height)
+        info["center_ground"] = float(smooth_heights[idx])
+        info["center_surface"] = center_surface
+        c = info["center"]
+        nrm2 = info["nrm2"]
         edge_height = center_surface - math.tan(cross_pitch) * half_road
         start_height = edge_height - curb_height
         width_needed = _estimate_required_ditch_width(
@@ -218,17 +264,9 @@ def _collect_profile(
             ditch_width,
             start_height,
         )
+        info["ditch_width"] = width_needed
         max_ditch_width = max(max_ditch_width, width_needed)
-        sample_info.append(
-            {
-                "center": c,
-                "nrm2": nrm2,
-                "center_surface": center_surface,
-                "ditch_width": width_needed,
-                "dir2": sample["dir2"],
-                "s": sample["s"],
-            }
-        )
+        info["index"] = idx
 
     offsets = _build_offsets(half_road, shoulder, max_ditch_width)
 
@@ -307,12 +345,14 @@ class RoadSurface:
                 self._uniform_offsets = True
                 self._offset_step = first
                 self._offset_inv_step = 1.0 / first
-        centers = (
-            np.array([info["center"] for info in self.sample_info], dtype=float)
-            if self.sample_info
-            else np.empty((0, 2), dtype=float)
-        )
+        if self.sample_info:
+            centers = np.array([info["center"] for info in self.sample_info], dtype=float)
+            s_values = np.array([float(info["s"]) for info in self.sample_info], dtype=float)
+        else:
+            centers = np.empty((0, 2), dtype=float)
+            s_values = np.empty(0, dtype=float)
         self._centers = centers
+        self._s_values = s_values
         self._last_sample: Optional[dict] = None
         self._reuse_radius2 = (self.search_radius * 0.6) ** 2
         grid: dict[tuple[int, int], list[int]] = {}
@@ -438,9 +478,55 @@ class RoadSurface:
         offset = dx * best["nrm2"][0] + dz * best["nrm2"][1]
         if self._outer_extent > 0.0 and abs(offset) > self._outer_limit:
             return None
+
         road_h = self._height_from_sample(best, offset)
         if road_h is None or not math.isfinite(road_h):
             return None
+
+        s_values = self._s_values
+        info_list = self.sample_info
+        if s_values.size >= 2:
+            along = dx * best["dir2"][0] + dz * best["dir2"][1]
+            s_query = float(best["s"]) + along
+            idx_hi = int(np.searchsorted(s_values, s_query, side="right"))
+            idx_lo = idx_hi - 1
+            if idx_hi <= 0:
+                idx_lo = idx_hi = 0
+            elif idx_hi >= len(s_values):
+                idx_hi = idx_lo = len(s_values) - 1
+            elif idx_lo < 0:
+                idx_lo = 0
+
+            info_lo = info_list[idx_lo]
+            info_hi = info_list[idx_hi]
+
+            if info_lo is not info_hi:
+                off_lo = (
+                    (x - info_lo["center"][0]) * info_lo["nrm2"][0]
+                    + (z - info_lo["center"][1]) * info_lo["nrm2"][1]
+                )
+                off_hi = (
+                    (x - info_hi["center"][0]) * info_hi["nrm2"][0]
+                    + (z - info_hi["center"][1]) * info_hi["nrm2"][1]
+                )
+
+                if (
+                    self._outer_extent <= 0.0
+                    or (abs(off_lo) <= self._outer_limit and abs(off_hi) <= self._outer_limit)
+                ):
+                    h_lo = self._height_from_sample(info_lo, off_lo)
+                    h_hi = self._height_from_sample(info_hi, off_hi)
+                    if h_lo is not None and h_hi is not None:
+                        span = s_values[idx_hi] - s_values[idx_lo]
+                        if span > 1e-6:
+                            t = (s_query - s_values[idx_lo]) / span
+                            t = min(max(t, 0.0), 1.0)
+                            road_h = float(h_lo + (h_hi - h_lo) * t)
+                        else:
+                            road_h = float((h_lo + h_hi) * 0.5)
+            else:
+                road_h = float(road_h)
+
         self._last_sample = best
         return float(road_h)
 
@@ -481,6 +567,16 @@ def build_road_vertices(
     half_plus_sh = half_road + shoulder
 
     path_np = [np.array(p, float) for p in path]
+    lane_span = max(cfg.LANE_COUNT_MIN, min(cfg.LANE_COUNT_MAX, lanes))
+    if cfg.LANE_COUNT_MAX > cfg.LANE_COUNT_MIN:
+        t = (lane_span - cfg.LANE_COUNT_MIN) / (cfg.LANE_COUNT_MAX - cfg.LANE_COUNT_MIN)
+    else:
+        t = 0.0
+    smooth_span = (
+        cfg.ROAD_PROFILE_SMOOTH_MIN
+        + t * (cfg.ROAD_PROFILE_SMOOTH_MAX - cfg.ROAD_PROFILE_SMOOTH_MIN)
+    )
+
     profile = _collect_profile(
         terrain,
         path_np,
@@ -491,6 +587,7 @@ def build_road_vertices(
         ditch_width,
         ditch_depth,
         along_step,
+        smooth_span,
     )
 
     samples = profile["samples"]
@@ -872,6 +969,16 @@ def apply_plan(terrain, path: List[Tuple[float, float]], params: dict, rng: Opti
     offsets = np.linspace(-half_span, half_span, max(6, lanes * 3 + 3))
     path_np = [np.array(p, float) for p in path]
 
+    lane_span = max(cfg.LANE_COUNT_MIN, min(cfg.LANE_COUNT_MAX, lanes))
+    if cfg.LANE_COUNT_MAX > cfg.LANE_COUNT_MIN:
+        t = (lane_span - cfg.LANE_COUNT_MIN) / (cfg.LANE_COUNT_MAX - cfg.LANE_COUNT_MIN)
+    else:
+        t = 0.0
+    smooth_span = (
+        cfg.ROAD_PROFILE_SMOOTH_MIN
+        + t * (cfg.ROAD_PROFILE_SMOOTH_MAX - cfg.ROAD_PROFILE_SMOOTH_MIN)
+    )
+
     profile = _collect_profile(
         terrain,
         path_np,
@@ -882,6 +989,7 @@ def apply_plan(terrain, path: List[Tuple[float, float]], params: dict, rng: Opti
         ditch_width,
         ditch_depth,
         along_step,
+        smooth_span,
     )
 
     for sample in profile["samples"]:
