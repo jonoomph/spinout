@@ -501,8 +501,8 @@ def build_road_vertices(
 
     # prepare lane-marking definitions
     lines_list: list[tuple[float, list[float], bool]] = []
-    left_edge_off = -half_plus_sh
-    right_edge_off = half_plus_sh
+    left_edge_off = -half_road
+    right_edge_off = half_road
     left_edge_col = cfg.WHITE_COL
     right_edge_col = cfg.YELLOW_COL if lanes == 1 else cfg.WHITE_COL
     lines_list.append((left_edge_off, left_edge_col, False))
@@ -582,10 +582,19 @@ def build_road_vertices(
             off_a = abs(offsets[j])
             off_b = abs(offsets[j + 1])
             if off_a <= deck_limit or off_b <= deck_limit:
-                col0 = shoulder_col if off_a > half_road + 1e-6 else road_col
-                col1 = shoulder_col if off_b > half_road + 1e-6 else road_col
-                col2 = shoulder_col if off_a > half_road + 1e-6 else road_col
-                col3 = shoulder_col if off_b > half_road + 1e-6 else road_col
+                in_lane = (
+                    off_a <= half_road + 1e-6 and off_b <= half_road + 1e-6
+                )
+                if in_lane:
+                    col0 = road_col
+                    col1 = road_col
+                    col2 = road_col
+                    col3 = road_col
+                else:
+                    col0 = shoulder_col
+                    col1 = shoulder_col
+                    col2 = shoulder_col
+                    col3 = shoulder_col
                 emit_quad(
                     deck_vertices,
                     r0[j],
