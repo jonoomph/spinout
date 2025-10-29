@@ -33,6 +33,7 @@ from .colors import (
     TERRAIN_SNOW_COLOR,
     TERRAIN_DIRT_COLOR,
 )
+from .effects import SkidMarkSystem
 
 
 # ---------------------------------------------------------------------------
@@ -150,6 +151,7 @@ class Environment:
         self.terrain: Optional[Terrain] = None
         self.car: Optional[Car] = None
         self.rp = None
+        self.skidmarks = SkidMarkSystem()
 
     # ------------------------------------------------------------------
     # World generation helpers
@@ -301,6 +303,8 @@ class Environment:
             pos, rot = get_safe_start_position_and_rot(self.terrain, rp, 15.0)
             self.car.body.pos, self.car.body.rot = pos, rot
 
+        self.skidmarks.reset()
+
         # Reset counters --------------------------------------------------------
         self.step_count = 0
         self.time = 0.0
@@ -376,6 +380,8 @@ class Environment:
             self.car.body.pos, self.car.body.rot = pos, rot
         self.car_info = f"{car_data['make']} {car_data['model']} ({car_data['year']})"
         self.cfg["car_index"] = car_index
+
+        self.skidmarks.reset()
 
         # Reset episode counters
         self.step_count = 0
@@ -702,7 +708,7 @@ class Environment:
                 self.free_cam_pos = np.array(cam_pos, dtype=float)
 
         mvp = compute_mvp(self.width, self.height, cam_pos, right, forward, up_vec)
-        self.render_ctx.set_camera(cam_pos)
+        self.render_ctx.set_camera_pose(cam_pos, forward, right, up_vec)
         self.render_ctx.set_mode(self.render_mode)
         self.render_ctx.clear()
 
@@ -713,6 +719,9 @@ class Environment:
                 continue
             vao, _vbo, noise = layer
             self.render_ctx.render_terrain(vao, mvp, noise)
+        skid_vertices = self.skidmarks.get_vertices()
+        if skid_vertices.size:
+            self.render_ctx.render_skid_marks(skid_vertices, mvp)
         if self.sign_post_vao is not None:
             self.render_ctx.render_signs(self.sign_post_vao, mvp)
         for vao, tex in self.sign_billboards:
@@ -845,8 +854,11 @@ class Environment:
         self.car.accel = float(action.get("accel", 0.0))
         self.car.brake = float(action.get("brake", 0.0))
 
+        sub_dt = self.dt / self.substeps
         for _ in range(self.substeps):
-            self.car.update(self.dt / self.substeps)
+            self.car.update(sub_dt)
+            events = getattr(self.car, "slip_events", [])
+            self.skidmarks.step(sub_dt, events)
 
         self.step_count += 1
         self.time += self.dt

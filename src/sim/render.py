@@ -33,6 +33,9 @@ class RenderContext:
         self.light_dir = np.array([0.5, 1.0, 0.3], dtype='f4')
         self.light_color = np.array(SUN_LIGHT_COLOR, dtype='f4')
         self.camera_pos = np.zeros(3, dtype='f4')
+        self.camera_forward = np.array([0.0, 0.0, -1.0], dtype='f4')
+        self.camera_right = np.array([1.0, 0.0, 0.0], dtype='f4')
+        self.camera_up = np.array([0.0, 1.0, 0.0], dtype='f4')
         self._last_camera_pos = np.zeros(3, dtype='f4')
         self.camera_velocity = np.zeros(3, dtype='f4')
         self.fog_density = 0.0
@@ -101,6 +104,8 @@ class RenderContext:
         self.model_edge_vbo = None
         self.model_edge_vao = None
         self.car_model_tex = None
+        self.skid_vbo = None
+        self.skid_vao = None
 
         # sky + stars geometry buffers generated per session
         self.sky_vbo = None
@@ -289,6 +294,12 @@ class RenderContext:
             self._rain_anchor = self.camera_pos.copy()
         if not np.any(self._last_camera_pos):
             self._last_camera_pos = self.camera_pos.copy()
+
+    def set_camera_pose(self, pos, forward, right, up):
+        self.set_camera(pos)
+        self.camera_forward = np.array(forward, dtype='f4')
+        self.camera_right = np.array(right, dtype='f4')
+        self.camera_up = np.array(up, dtype='f4')
 
     def setup_weather(
         self,
@@ -1030,6 +1041,33 @@ class RenderContext:
         prog['tex'] = 0
         vao.render(moderngl.TRIANGLES)
         self.ctx.wireframe = was_wireframe
+
+    def render_skid_marks(self, vertices, mvp):
+        if vertices.size == 0:
+            return
+        data = vertices.astype('f4').tobytes()
+        if self.skid_vbo is None or len(data) > self.skid_vbo.size:
+            if self.skid_vbo is not None:
+                self.skid_vbo.release()
+            if self.skid_vao is not None:
+                self.skid_vao.release()
+            self.skid_vbo = self.ctx.buffer(data)
+            self.skid_vao = self.ctx.vertex_array(
+                self.prog,
+                [(self.skid_vbo, '3f 4f', 'in_vert', 'in_color')],
+            )
+        else:
+            self.skid_vbo.write(data)
+        was_wire = self.ctx.wireframe
+        self.ctx.wireframe = False
+        self.prog['mvp'].write(mvp.T.tobytes())
+        self._apply_common_uniforms(self.prog)
+        if 'noise_scale' in self.prog:
+            self.prog['noise_scale'].value = 0.0
+        if 'terrain_mode' in self.prog:
+            self.prog['terrain_mode'].value = 0
+        self.skid_vao.render(moderngl.TRIANGLES)
+        self.ctx.wireframe = was_wire
 
     def render_car(self, vertices, mvp):
         main_vertices, shock_vertices = vertices

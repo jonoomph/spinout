@@ -399,6 +399,7 @@ class Car:
         self.brake_pad_drag = car_data.get("brake_pad_drag_nm", 2.5)
         self.tire_width = tire_width
         self.is_upside_down = False
+        self.slip_events: list[dict] = []
 
         # Calculate body_offset so the body's geometric centre aligns with the CG
         half_length = dimensions["length"] / 2
@@ -596,7 +597,16 @@ class Car:
             rr = -rr_mag * (self.body.vel / speed)
             self.body.apply_force(rr, self.body.pos)
 
-    def _update_wheel(self, wheel, dt, g_front, g_rear):
+    def _surface_mark_color(self, friction):
+        base = np.array(getattr(self.terrain, "color", [0.12, 0.1, 0.08])[:3], dtype=float)
+        if friction >= 0.93:
+            return [0.05, 0.05, 0.05]
+        if friction >= 0.8:
+            return [0.08, 0.07, 0.06]
+        dark = np.clip(base * 0.45, 0.02, 0.4)
+        return dark.tolist()
+
+    def _update_wheel(self, index, wheel, dt, g_front, g_rear):
         pos = self.body.pos + self.body.rot.rotate(wheel.rel_pos)
         if (
             pos[0] < 0
@@ -657,8 +667,8 @@ class Car:
         alpha = math.atan2(lat_v, abs(long_v) + 0.1)
         slip = (wheel.ang_vel * wheel.radius - long_v) / (abs(long_v) + 0.1)
         is_static = self.brake > 0 and abs(long_v) < 0.3 and abs(wheel.ang_vel) < 0.1
-        mu = 1.4 if is_static else 1.2
-        mu *= self.terrain.get_friction(pos[0], pos[2])
+        base_mu = self.terrain.get_friction(pos[0], pos[2])
+        mu = (1.4 if is_static else 1.2) * base_mu
         width_factor = wheel.width / 0.2
         max_fric = mu * load * width_factor
         long_f = max_fric * math.tanh(self.long_stiffness * slip)
@@ -674,13 +684,19 @@ class Car:
             scale = max_fric / total_f
             long_f *= scale
             lat_f *= scale
-        long_ratio = abs(slip)
-        lat_ratio = abs(alpha) / 0.15
-        wheel.slip_ratio = (
-            0.0
-            if abs(long_v) < 0.05 or (self.brake > 0 and abs(long_v) < 0.3)
-            else min(max(long_ratio, lat_ratio), 1.0)
-        )
+        grip_scale = 1.0 / max(0.55, base_mu + 1e-3)
+        ref_angle = math.radians(14.0) * max(0.75, base_mu)
+        long_ratio = abs(slip) * grip_scale
+        lat_ratio = abs(alpha) / max(ref_angle, 1e-3)
+        slip_index = max(long_ratio, lat_ratio)
+        if slip_index < 0.03:
+            slip_index = 0.0
+        low_speed_cutoff = 0.08 if self.brake <= 0 else 0.35
+        if abs(long_v) < low_speed_cutoff:
+            wheel.slip_ratio = 0.0
+        else:
+            wheel.slip_ratio = min(slip_index, 1.0)
+        slip_strength = wheel.slip_ratio
         tire_f = forward * long_f + right * lat_f
         self.body.apply_force(tire_f, pos)
         drive_t = (
@@ -713,6 +729,50 @@ class Car:
             pad_t = -self.brake_pad_drag * pad_sign
             ang_acc = (drive_t + brake_t + friction_t + extra_t + pad_t) / 10
             wheel.ang_vel += ang_acc * dt
+        event_kind = None
+        slip_velocity = math.hypot(long_v, lat_v)
+        slip_trigger = 0.42
+        speed_trigger = 0.35
+        if base_mu < 0.75:
+            grip_modifier = max(0.6, base_mu / 0.75)
+            slip_trigger *= grip_modifier
+            speed_trigger *= grip_modifier
+        if slip_strength > slip_trigger and slip_velocity > speed_trigger:
+            if wheel.is_driven and self.accel > 0.4 and slip > 0.35:
+                event_kind = "drive"
+            elif self.brake > 0.35 and abs(long_v) > 0.5 and abs(slip) > 0.35:
+                event_kind = "brake"
+            elif abs(lat_v) > 0.8:
+                event_kind = "slide"
+
+        if wheel.is_grounded and event_kind is not None:
+            contact = np.array([pos[0], ground_h + 0.02, pos[2]], dtype=float)
+            norm_load = self.body.mass * 9.81 / 4.0
+            load_scale = min(1.5, load / (norm_load + 1e-6)) if norm_load > 0 else 1.0
+            slip_excess = max(0.0, slip_strength - slip_trigger)
+            norm_excess = slip_excess / (1.0 - slip_trigger + 1e-6)
+            mark_intensity = float(
+                np.clip(norm_excess * (0.6 + 0.4 * load_scale), 0.0, 1.0)
+            )
+            event = {
+                "index": index,
+                "position": contact,
+                "right": right.copy(),
+                "forward": forward.copy(),
+                "width": float(wheel.width),
+                "intensity": mark_intensity,
+                "kind": event_kind,
+                "slip": float(slip),
+                "lat_slip": float(alpha),
+                "long_v": float(long_v),
+                "load": float(load),
+                "mu": float(base_mu),
+                "base_color": self._surface_mark_color(base_mu),
+                "driven": wheel.is_driven,
+                "surface_height": float(ground_h),
+            }
+            self.slip_events.append(event)
+
         return 1
 
     def _engine_brake_torque(self, rpm):
@@ -775,9 +835,10 @@ class Car:
             / 2
         )
         grounded = 0
+        self.slip_events = []
         bottomed = False
-        for w in self.wheels:
-            grounded += self._update_wheel(w, dt, g_front, g_rear)
+        for i, w in enumerate(self.wheels):
+            grounded += self._update_wheel(i, w, dt, g_front, g_rear)
             bottomed = bottomed or w.bottomed
         if self.is_upside_down or grounded < 2 or bottomed:
             self._handle_collisions()
