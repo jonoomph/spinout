@@ -16,6 +16,10 @@ def render_hud(
     surface_info: Optional[str] = None,
     render_mode: int = 0,
     camera_mode: int = 0,
+    wind_speed_mph: float = 0.0,
+    wind_direction_deg: float = 0.0,
+    wind_label: str = "Calm",
+    wind_vectors_enabled: bool = False,
 ) -> None:
     """
     Draw a slim top-bar HUD onto hud_surf.
@@ -49,7 +53,7 @@ def render_hud(
     # big centered speed, raised a bit (40% down instead of 50%)
     speed_txt = f"{speed_mph:.1f} mph"
     surf_speed = font_big.render(speed_txt, True, (255, 255, 255))
-    y_speed = int(bar_h * 0.4)
+    y_speed = int(bar_h * 0.45)
     rect_speed = surf_speed.get_rect(center=(w // 2, y_speed))
     hud_surf.blit(surf_speed, rect_speed)
 
@@ -67,7 +71,69 @@ def render_hud(
     cam_names = {0: "Follow Far", 1: "Follow Near", 2: "Driver", 3: "Free Fly"}
     line_h = font_small.get_height() + 3
 
-    # left cluster: FPS, car, surface
+    # helper for vane drawing
+    def _ipoint(pt):
+        return int(round(pt[0])), int(round(pt[1]))
+
+    vane_center = (w // 2, int(bar_h * 0.22))
+    vane_radius = 22
+    ring_color = (120, 120, 120)
+    arrow_color = (235, 235, 235)
+    pygame.draw.circle(hud_surf, ring_color, vane_center, vane_radius, 1)
+    pygame.draw.circle(hud_surf, (70, 70, 70), vane_center, max(vane_radius - 6, 2), 1)
+    for ang in (0.0, 90.0, 180.0, 270.0):
+        rad = math.radians(ang)
+        inner = (
+            vane_center[0] + math.sin(rad) * (vane_radius - 6),
+            vane_center[1] - math.cos(rad) * (vane_radius - 6),
+        )
+        outer = (
+            vane_center[0] + math.sin(rad) * (vane_radius - 2),
+            vane_center[1] - math.cos(rad) * (vane_radius - 2),
+        )
+        pygame.draw.line(hud_surf, ring_color, _ipoint(inner), _ipoint(outer), 1)
+    pygame.draw.circle(
+        hud_surf,
+        (200, 200, 200),
+        (vane_center[0], vane_center[1] - vane_radius + 3),
+        2,
+    )
+
+    if wind_speed_mph < 0.15:
+        pygame.draw.circle(hud_surf, arrow_color, vane_center, 4)
+    else:
+        rad = math.radians(wind_direction_deg % 360.0)
+        dx = math.sin(rad)
+        dy = -math.cos(rad)
+        norm = max(0.0, min(wind_speed_mph / 32.0, 1.0))
+        tail_len = vane_radius * (0.28 + 0.22 * norm)
+        arrow_len = vane_radius * (0.6 + 0.4 * norm)
+        tail = (
+            vane_center[0] - dx * tail_len,
+            vane_center[1] - dy * tail_len,
+        )
+        tip = (
+            vane_center[0] + dx * arrow_len,
+            vane_center[1] + dy * arrow_len,
+        )
+        pygame.draw.line(hud_surf, arrow_color, _ipoint(tail), _ipoint(tip), 3)
+        perp = (-dy, dx)
+        head = 6 + norm * 5
+        left = (
+            tip[0] - dx * 8 - perp[0] * head,
+            tip[1] - dy * 8 - perp[1] * head,
+        )
+        right = (
+            tip[0] - dx * 8 + perp[0] * head,
+            tip[1] - dy * 8 + perp[1] * head,
+        )
+        pygame.draw.polygon(
+            hud_surf,
+            arrow_color,
+            [_ipoint(tip), _ipoint(left), _ipoint(right)],
+        )
+
+    # left cluster: FPS, car, surface, wind
     x_left, y = 10, 10
     fps_txt = f"FPS [draw/physics]: {render_fps:.1f} | {physics_fps:.1f}"
     hud_surf.blit(
@@ -87,6 +153,14 @@ def render_hud(
             font_small.render(f"{surface_info} (T)", True, (255, 255, 255)),
             (x_left, y),
         )
+        y += line_h
+    wind_state = "Calm" if wind_speed_mph < 0.15 else f"{wind_label} {wind_speed_mph:.1f} mph"
+    indicator_state = "ON" if wind_vectors_enabled else "OFF"
+    wind_txt = f"Wind [W]: {wind_state} | Indicators {indicator_state}"
+    hud_surf.blit(
+        font_small.render(wind_txt, True, (255, 255, 255)),
+        (x_left, y),
+    )
 
     # right cluster: steer, mode, camera
     x_right, y = w - 10, 10

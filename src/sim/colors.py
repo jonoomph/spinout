@@ -7,6 +7,8 @@ WIRE_COLOR = (1.0, 1.0, 1.0, 1.0)
 CAR_BODY_COLOR = (252/255, 255/255, 255/255, 1.0)
 WHEEL_DEFAULT_COLOR = (0.2, 0.2, 0.2, 1.0)
 WIND_COLOR = (200/255, 200/255, 255/255, 1.0)
+# Light blue accent for ambient wind indicators rendered on the car corners.
+AMBIENT_WIND_COLOR = (170/255, 210/255, 1.0, 1.0)
 
 # Terrain base colors
 TERRAIN_DEFAULT_COLOR = (34/255, 139/255, 34/255, 1.0)

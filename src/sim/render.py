@@ -1,4 +1,5 @@
 # render.py
+import math
 import moderngl
 import pygame
 import numpy as np
@@ -964,6 +965,9 @@ class RenderContext:
             self.ctx.line_width = 1.0
             self.ctx.wireframe = was_wire
 
+            self.ctx.line_width = 1.0
+            self.ctx.wireframe = was_wire
+
         if self.puddle_vao is not None and self.puddle_strength > 0.02:
             was_wire = self.ctx.wireframe
             self.ctx.wireframe = False
@@ -1084,7 +1088,8 @@ class RenderContext:
         self.prog['mvp'].write(mvp.T.tobytes())
         self._apply_common_uniforms(self.prog)
         if main_vertices:
-            main_data = np.array(main_vertices, dtype='f4').tobytes()
+            main_array = np.array(main_vertices, dtype='f4')
+            main_data = main_array.tobytes()
             if self.main_vbo is None or len(main_data) > self.main_vbo.size:
                 if self.main_vbo:
                     self.main_vbo.release()
@@ -1093,9 +1098,11 @@ class RenderContext:
             else:
                 self.main_vbo.write(main_data, offset=0)
             self.ctx.line_width = 1.0
-            self.main_vao.render(moderngl.LINES)
+            vertex_count = int(main_array.size // 7)
+            self.main_vao.render(moderngl.LINES, vertices=vertex_count)
         if shock_vertices:
-            shock_data = np.array(shock_vertices, dtype='f4').tobytes()
+            shock_array = np.array(shock_vertices, dtype='f4')
+            shock_data = shock_array.tobytes()
             if self.shock_vbo is None or len(shock_data) > self.shock_vbo.size:
                 if self.shock_vbo:
                     self.shock_vbo.release()
@@ -1104,7 +1111,8 @@ class RenderContext:
             else:
                 self.shock_vbo.write(shock_data, offset=0)
             self.ctx.line_width = 3.0
-            self.shock_vao.render(moderngl.LINES)
+            shock_count = int(shock_array.size // 7)
+            self.shock_vao.render(moderngl.LINES, vertices=shock_count)
 
     def render_car_model(self, vertices, mvp):
         """Draw either wireframe or textured model using explicit VAO layouts."""

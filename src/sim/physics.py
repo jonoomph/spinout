@@ -400,6 +400,8 @@ class Car:
         self.tire_width = tire_width
         self.is_upside_down = False
         self.slip_events: list[dict] = []
+        self.wind_velocity = np.zeros(3, dtype=float)
+        self.show_wind_vectors = False
 
         # Calculate body_offset so the body's geometric centre aligns with the CG
         half_length = dimensions["length"] / 2
@@ -488,6 +490,14 @@ class Car:
         self.steer = self._steering_curve(raw)
         self.accel = accel_steps / ACCEL_MAX
         self.brake = brake_steps / BRAKE_MAX
+
+    def set_wind(self, wind_vec):
+        """Set the ambient wind velocity affecting the car's aerodynamics."""
+
+        if wind_vec is None:
+            self.wind_velocity[:] = 0.0
+        else:
+            self.wind_velocity[:] = wind_vec
 
     def _steering_curve(self, x):
         """Map raw steering input ``x`` in ``[-1,1]`` through a shallow S curve.
@@ -588,13 +598,17 @@ class Car:
     def _apply_gravity_drag(self):
         gravity = np.array([0.0, -9.81, 0.0]) * self.body.mass
         self.body.apply_force(gravity, self.body.pos)
-        speed = np.linalg.norm(self.body.vel)
-        if speed:
-            drag_mag = 0.5 * AIR_DENSITY * self.drag_coeff * self.frontal_area * speed**2
-            drag = -drag_mag * (self.body.vel / speed)
+        rel_vel = self.body.vel - self.wind_velocity
+        rel_speed = np.linalg.norm(rel_vel)
+        if rel_speed > 1e-6:
+            drag_mag = 0.5 * AIR_DENSITY * self.drag_coeff * self.frontal_area * rel_speed**2
+            drag = -drag_mag * (rel_vel / rel_speed)
             self.body.apply_force(drag, self.body.pos)
-            rr_mag = self.body.mass * 9.81 * (self.c_rr0 + self.rr_k_v * speed)
-            rr = -rr_mag * (self.body.vel / speed)
+
+        ground_speed = np.linalg.norm(self.body.vel)
+        if ground_speed > 1e-6:
+            rr_mag = self.body.mass * 9.81 * (self.c_rr0 + self.rr_k_v * ground_speed)
+            rr = -rr_mag * (self.body.vel / ground_speed)
             self.body.apply_force(rr, self.body.pos)
 
     def _surface_mark_color(self, friction):

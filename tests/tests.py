@@ -78,6 +78,34 @@ def simulate(env: Environment, accel: bool = True) -> float:
     return time
 
 
+def coast_with_wind(env: Environment, wind_vec, seconds: float = 3.0, speed: float = 20.0):
+    """Reset ``env`` and coast at ``speed`` under a fixed ``wind_vec``."""
+
+    env.reset()
+    env.wind_system = None
+    env.wind_sample = None
+
+    car = env.car
+    car.accel = 0
+    car.brake = 0
+    car.steer = 0
+
+    forward = car.body.rot.rotate(np.array([0.0, 0.0, 1.0]))
+    car.body.vel[:] = forward * speed
+    car.body.angvel[:] = 0.0
+    start_pos = car.body.pos.copy()
+    car.set_wind(np.array(wind_vec, dtype=float))
+
+    sub_dt = env.dt / env.substeps
+    steps = int(seconds / sub_dt)
+    for _ in range(steps):
+        car.update(sub_dt)
+
+    final_vel = car.body.vel.copy()
+    delta_pos = car.body.pos - start_pos
+    return final_vel, delta_pos, forward
+
+
 def run_test(car_data, visualize: int = VISUALIZE):
     """Return measured 0→60 and 60→0 times for ``car_data``."""
 
@@ -108,6 +136,37 @@ def run_test(car_data, visualize: int = VISUALIZE):
 
     brake_time = simulate(env, accel=False)
     return accel_time, brake_time
+
+
+class TestWindEffects:
+    def test_affects_longitudinal_speed(self):
+        env = Environment({"flat": True}, mode="train")
+
+        base_vel, _delta, base_forward = coast_with_wind(
+            env, [0.0, 0.0, 0.0], seconds=3.0
+        )
+        head_vel, _delta, head_forward = coast_with_wind(
+            env, [0.0, 0.0, -12.0], seconds=3.0
+        )
+        tail_vel, _delta, tail_forward = coast_with_wind(
+            env, [0.0, 0.0, 12.0], seconds=3.0
+        )
+
+        base_speed = float(np.dot(base_vel, base_forward))
+        head_speed = float(np.dot(head_vel, head_forward))
+        tail_speed = float(np.dot(tail_vel, tail_forward))
+
+        assert head_speed < base_speed - 0.1
+        assert tail_speed > base_speed + 0.05
+
+    def test_crosswind_deflects_vehicle(self):
+        env = Environment({"flat": True}, mode="train")
+
+        pos_west = coast_with_wind(env, [20.0, 0.0, 0.0], seconds=5.0)[1]
+        pos_east = coast_with_wind(env, [-20.0, 0.0, 0.0], seconds=5.0)[1]
+
+        assert pos_west[0] < -0.1
+        assert pos_east[0] > 0.1
 
 
 def run_test_visual(env: Environment, accel_expected, brake_expected):

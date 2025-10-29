@@ -35,6 +35,7 @@ from .colors import (
 )
 from .effects import SkidMarkSystem
 from .buildings import generate_buildings
+from .wind import WindSystem, WindSample
 
 
 # ---------------------------------------------------------------------------
@@ -153,6 +154,9 @@ class Environment:
         self.car: Optional[Car] = None
         self.rp = None
         self.skidmarks = SkidMarkSystem()
+        self.wind_system: Optional[WindSystem] = None
+        self.wind_sample: Optional[WindSample] = None
+        self.wind_vectors_enabled = False
 
     # ------------------------------------------------------------------
     # World generation helpers
@@ -174,6 +178,7 @@ class Environment:
             self._exit_free_camera()
         self.camera_mode = 0
         self._last_car_camera_mode = 0
+        self.wind_vectors_enabled = False
 
         self._set_status(0.2, "Generating terrain...")
         if self.cfg.get("flat"):
@@ -194,6 +199,8 @@ class Environment:
             rp = None
             self.plan = {}
             self.buildings = {"vertices": np.zeros((0, 10), dtype="f4"), "instances": [], "palette": None, "noise_scale": 0.0}
+            self.wind_system = WindSystem(self.rng, self.weather, self.precipitation, calm=True)
+            self.wind_sample = self.wind_system.update(0.0)
         else:
             # Procedurally generate a random driving environment
             precip_override = self.cfg.get("precipitation")
@@ -271,6 +278,12 @@ class Environment:
             apply_plan(self.terrain, rp, plan, rng=self.rng)
             self.plan = plan
             self.buildings = generate_buildings(self.terrain, rp, plan, rng=self.rng)
+            self.wind_system = WindSystem(
+                self.rng,
+                self.weather,
+                getattr(self, "precipitation", "none"),
+            )
+            self.wind_sample = self.wind_system.update(0.0)
 
         self.rp = rp
 
@@ -292,6 +305,7 @@ class Environment:
         car_index = int(self.cfg.get("car_index", 0))
         car_data = cars[car_index]
         self.car = Car(self.terrain, car_data)
+        self.car.show_wind_vectors = self.wind_vectors_enabled
         self.car_info = f"{car_data['make']} {car_data['model']} ({car_data['year']})"
 
         if self.cfg.get("flat"):
@@ -324,6 +338,14 @@ class Environment:
         self.surface_info = (
             f"{precip_text} {weather.title()} {self.road_type.title()} | {terrain_type.title()}"
         )
+        calm = bool(self.cfg.get("flat"))
+        self.wind_system = WindSystem(
+            self.rng,
+            weather,
+            getattr(self, "precipitation", "none"),
+            calm=calm,
+        )
+        self.wind_sample = self.wind_system.update(0.0)
         self.render_ctx.setup_weather(
             weather,
             terrain_type,
@@ -375,11 +397,13 @@ class Environment:
             ground_h = self.terrain.get_height(start_x, start_z)
             rot = self.car.body.rot
             self.car = Car(self.terrain, car_data)
+            self.car.show_wind_vectors = self.wind_vectors_enabled
             self.car.body.pos = np.array([start_x, ground_h + self.car.cg_height_m, start_z])
             self.car.body.rot = rot
         else:
             pos, rot = get_safe_start_position_and_rot(self.terrain, self.rp, 15.0)
             self.car = Car(self.terrain, car_data)
+            self.car.show_wind_vectors = self.wind_vectors_enabled
             self.car.body.pos, self.car.body.rot = pos, rot
         self.car_info = f"{car_data['make']} {car_data['model']} ({car_data['year']})"
         self.cfg["car_index"] = car_index
@@ -628,6 +652,8 @@ class Environment:
         self.clock = pygame.time.Clock()
         self.render_ctx = RenderContext(self.width, self.height)
         self.render_ctx.setup_weather(self.weather, self.terrain_type, self.road_type)
+        if self.car is not None:
+            self.car.show_wind_vectors = self.wind_vectors_enabled
 
         # Terrain
         tb, _ = build_terrain_triangles(self.terrain)
@@ -762,6 +788,14 @@ class Environment:
         fps_r = self.clock.get_fps()
         fps_p = fps_r * self.substeps
         steer_angle = next(w.steer_angle for w in self.car.wheels if w.is_front)
+        wind_speed = 0.0
+        wind_dir = 0.0
+        wind_label = "Calm"
+        if self.wind_sample is not None:
+            wind_speed = self.wind_sample.speed_mph
+            wind_dir = self.wind_sample.direction_deg
+            if wind_speed > 0.05:
+                wind_label = self.wind_sample.compass_label
         render_hud(
             self.hud_surf,
             self.font_small,
@@ -776,6 +810,10 @@ class Environment:
             surface_info=self.surface_info,
             render_mode=self.render_mode,
             camera_mode=self.camera_mode,
+            wind_speed_mph=wind_speed,
+            wind_direction_deg=wind_dir,
+            wind_label=wind_label,
+            wind_vectors_enabled=self.wind_vectors_enabled,
         )
         self.render_ctx.render_hud(self.hud_surf)
         pygame.display.flip()
@@ -862,6 +900,10 @@ class Environment:
                         )
                     elif e.key == pygame.K_t:
                         self._cycle_surface()
+                    elif e.key == pygame.K_w:
+                        self.wind_vectors_enabled = not self.wind_vectors_enabled
+                        if self.car is not None:
+                            self.car.show_wind_vectors = self.wind_vectors_enabled
                     elif e.key == pygame.K_r:
                         obs = self.reset()
                         self.init_renderer()
@@ -875,6 +917,16 @@ class Environment:
         self.car.steer = float(action.get("steer", 0.0))
         self.car.accel = float(action.get("accel", 0.0))
         self.car.brake = float(action.get("brake", 0.0))
+
+        if self.wind_system is not None:
+            self.wind_sample = self.wind_system.update(self.dt)
+            if self.car is not None:
+                self.car.set_wind(self.wind_sample.vector)
+        else:
+            if self.car is not None:
+                self.car.set_wind(None)
+        if getattr(self, "render_ctx", None) and self.car is not None:
+            self.car.show_wind_vectors = self.wind_vectors_enabled
 
         sub_dt = self.dt / self.substeps
         for _ in range(self.substeps):

@@ -1,7 +1,12 @@
 # car.py
 import math
 import numpy as np
-from .colors import CAR_BODY_COLOR, WHEEL_DEFAULT_COLOR, WIND_COLOR
+from .colors import (
+    CAR_BODY_COLOR,
+    WHEEL_DEFAULT_COLOR,
+    WIND_COLOR,
+    AMBIENT_WIND_COLOR,
+)
 from .constants import AIR_DENSITY
 
 
@@ -120,17 +125,46 @@ def collect_car_vertices(car, car_up, car_dir, dt, wheel_spin_accum):
         shock_vertices.extend(list(shock_start) + susp_color)
         shock_vertices.extend(list(shock_end) + susp_color)
 
-    # Wind resistance lines
-    vel_mag = np.linalg.norm(car.body.vel)
-    if vel_mag > 5:
-        drag_mag = 0.5 * AIR_DENSITY * car.drag_coeff * car.frontal_area * vel_mag**2
-        line_length = min(drag_mag / 100, 5)
-        rear_top_left = car.body.pos + car.body.rot.rotate(np.array([half_width, half_height + car.body_offset, -half_length]))
-        rear_top_right = car.body.pos + car.body.rot.rotate(np.array([-half_width, half_height + car.body_offset, -half_length]))
-        wind_color = list(WIND_COLOR)
-        for start_pos in [rear_top_left, rear_top_right]:
-            end_pos = start_pos - car_dir * line_length
-            main_vertices.extend(list(start_pos) + wind_color)
-            main_vertices.extend(list(end_pos) + wind_color)
+    show_wind_vectors = bool(getattr(car, "show_wind_vectors", False))
+    wind_vec = car.wind_velocity
+    wind_mag = float(np.linalg.norm(wind_vec))
+
+    if show_wind_vectors:
+        # Wind resistance lines follow the relative airflow acting on the car body.
+        rel_air = car.body.vel - wind_vec
+        rel_speed = np.linalg.norm(rel_air)
+        if rel_speed > 5.0:
+            drag_mag = (
+                0.5
+                * AIR_DENSITY
+                * car.drag_coeff
+                * car.frontal_area
+                * rel_speed**2
+            )
+            drag_dir = rel_air / rel_speed
+            line_length = min(drag_mag / 100, 5)
+            rear_top_left = car.body.pos + car.body.rot.rotate(
+                np.array([half_width, half_height + car.body_offset, -half_length])
+            )
+            rear_top_right = car.body.pos + car.body.rot.rotate(
+                np.array([-half_width, half_height + car.body_offset, -half_length])
+            )
+            wind_color = list(WIND_COLOR)
+            for start_pos in [rear_top_left, rear_top_right]:
+                end_pos = start_pos - drag_dir * line_length
+                main_vertices.extend(list(start_pos) + wind_color)
+                main_vertices.extend(list(end_pos) + wind_color)
+
+        # Ambient wind indicator arrows rendered along the top edges for quick cues.
+        if wind_mag > 0.05:
+            wind_dir = wind_vec / wind_mag
+            indicator_length = min(0.6 + wind_mag * 0.45, 3.2)
+            ambient_color = list(AMBIENT_WIND_COLOR)
+            top_edges = ((0, 1), (1, 5), (5, 4), (4, 0))
+            for a, b in top_edges:
+                start_pos = 0.5 * (world_corners[a] + world_corners[b])
+                end_pos = start_pos + wind_dir * indicator_length
+                main_vertices.extend(list(start_pos) + ambient_color)
+                main_vertices.extend(list(end_pos) + ambient_color)
 
     return main_vertices, shock_vertices
