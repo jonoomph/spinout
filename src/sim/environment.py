@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import math
 from pathlib import Path
-from typing import Callable, Dict, Optional, Tuple
+from typing import TYPE_CHECKING, Callable, Dict, Optional, Tuple
 from itertools import product
 
 import numpy as np
@@ -36,6 +36,11 @@ from .colors import (
 from .effects import SkidMarkSystem
 from .buildings import generate_buildings
 from .wind import WindSystem, WindSample
+from .control_api import DriverCommand, TelemetrySnapshot, VehicleState
+from .planner import PlannerPreviewer
+
+if TYPE_CHECKING:  # pragma: no cover - imported for type checking only
+    from src.controllers.controller import BaseController
 
 
 # ---------------------------------------------------------------------------
@@ -129,6 +134,16 @@ class Environment:
         self.episode_cost = 0.0
         self.plan: Dict = {}
         self.termination_reason: Optional[str] = None
+        self._planner = PlannerPreviewer()
+        self._telemetry = TelemetrySnapshot()
+        self._prev_velocity = np.zeros(3, dtype=float)
+        self._controller: Optional[BaseController] = None
+        self._controller_period = 0.0
+        self._controller_timer = 0.0
+        self._controller_last_command: Optional[DriverCommand] = None
+        self._last_driver_command = DriverCommand()
+        self._controller_hud = ("No Controller", "Manual Steer")
+        self._controller_enabled_last_step = False
 
         # Rendering state ------------------------------------------------------
         self.render_mode = 1
@@ -160,6 +175,111 @@ class Environment:
 
     # ------------------------------------------------------------------
     # World generation helpers
+
+    def attach_controller(self, controller: Optional["BaseController"]) -> None:
+        """Attach ``controller`` so :meth:`step` can poll it automatically."""
+
+        if controller is self._controller:
+            return
+        if self._controller is not None:
+            self._controller.detach()
+        self._controller = controller
+        self._controller_last_command = None
+        self._controller_timer = 0.0
+        self._update_controller_period()
+        if controller is not None:
+            controller.attach(self)
+            controller.reset()
+        self._controller_enabled_last_step = bool(controller and controller.enabled)
+        self._controller_hud = self._resolve_hud_labels()
+
+    def _update_controller_period(self) -> None:
+        if self._controller is None:
+            self._controller_period = 0.0
+            return
+        rate = max(float(self._controller.control_rate_hz), 1e-3)
+        self._controller_period = 1.0 / rate
+
+    def _resolve_hud_labels(self) -> Tuple[str, str]:
+        if self._controller is not None and self._controller.enabled:
+            module = self._controller.__class__.__module__.split(".")[-1]
+            controller_name = (
+                f"{module}.py controller" if module else self._controller.__class__.__name__
+            )
+            if module == "pid":
+                steer_label = "PID Steer"
+            else:
+                pretty = self._controller.__class__.__name__.replace("Controller", "").strip()
+                if not pretty:
+                    pretty = module or "Auto"
+                steer_label = f"{pretty.replace('_', ' ')} Steer"
+            return controller_name, steer_label
+        return "No Controller", "Manual Steer"
+
+    def _compute_state(self, prev_velocity: np.ndarray) -> VehicleState:
+        if self.car is None:
+            return VehicleState()
+        vel = self.car.body.vel.copy()
+        pos = self.car.body.pos.copy()
+        dt = max(self.dt, 1e-6)
+        accel = (vel - prev_velocity) / dt
+        fwd = self.car.body.rot.rotate(np.array([0, 0, 1]))
+        right = self.car.body.rot.rotate(np.array([1, 0, 0]))
+        speed = float(np.linalg.norm(vel))
+        v_ego = float(np.dot(vel, fwd))
+        lat_vel = float(np.dot(vel, right))
+        lat_acc = float(np.dot(accel, right))
+        long_acc = float(np.dot(accel, fwd))
+        roll_axis = self.car.body.rot.rotate(np.array([0, 1, 0]))
+        roll = float(math.atan2(roll_axis[0], roll_axis[1]))
+        roll_lat = 9.81 * math.sin(roll)
+        yaw = float(math.atan2(fwd[0], fwd[2]))
+        yaw_rate = float(np.dot(self.car.body.angvel, np.array([0.0, 1.0, 0.0])))
+
+        centripetal = v_ego * yaw_rate
+        if abs(lat_acc) < abs(centripetal) * 0.25:
+            lat_acc = centripetal
+        else:
+            lat_acc = 0.5 * (lat_acc + centripetal)
+        return VehicleState(
+            speed=speed,
+            v_ego=v_ego,
+            lat_velocity=lat_vel,
+            lat_accel=lat_acc,
+            long_accel=long_acc,
+            roll=roll,
+            roll_lataccel=roll_lat,
+            yaw=yaw,
+            yaw_rate=yaw_rate,
+            position=(float(pos[0]), float(pos[1]), float(pos[2])),
+            velocity=(float(vel[0]), float(vel[1]), float(vel[2])),
+        )
+
+    def _build_snapshot(
+        self,
+        prev_velocity: np.ndarray,
+        preview_hz: Optional[float] = None,
+    ) -> TelemetrySnapshot:
+        if self.car is None:
+            return TelemetrySnapshot()
+        state = self._compute_state(prev_velocity)
+        preview = self._planner.preview(self.car.body.pos, state.speed, preview_hz)
+        target = self._planner.immediate_target(
+            self.car.body.pos,
+            state.speed,
+            state.yaw,
+            preview,
+        )
+        return TelemetrySnapshot(state=state, target=target, future=preview)
+
+    def _refresh_initial_telemetry(self) -> None:
+        if self.car is None:
+            self._telemetry = TelemetrySnapshot()
+            self._prev_velocity = np.zeros(3, dtype=float)
+            return
+        vel = self.car.body.vel.copy()
+        self._prev_velocity = vel.copy()
+        self._telemetry = self._build_snapshot(vel)
 
     def _set_status(self, progress: float, message: str) -> None:
         self._status_progress = progress
@@ -198,6 +318,7 @@ class Environment:
             self.terrain.heights[:] = 0
             rp = None
             self.plan = {}
+            self._planner.set_plan(None, None)
             self.buildings = {"vertices": np.zeros((0, 10), dtype="f4"), "instances": [], "palette": None, "noise_scale": 0.0}
             self.wind_system = WindSystem(self.rng, self.weather, self.precipitation, calm=True)
             self.wind_sample = self.wind_system.update(0.0)
@@ -277,6 +398,10 @@ class Environment:
             self._set_status(0.5, "Laying roads...")
             apply_plan(self.terrain, rp, plan, rng=self.rng)
             self.plan = plan
+            self._planner.set_plan(
+                self.plan.get("drive_line"),
+                self.plan.get("speed_limits"),
+            )
             self.buildings = generate_buildings(self.terrain, rp, plan, rng=self.rng)
             self.wind_system = WindSystem(
                 self.rng,
@@ -814,6 +939,8 @@ class Environment:
             wind_direction_deg=wind_dir,
             wind_label=wind_label,
             wind_vectors_enabled=self.wind_vectors_enabled,
+            controller_name=self._controller_hud[0],
+            steer_label=self._controller_hud[1],
         )
         self.render_ctx.render_hud(self.hud_surf)
         pygame.display.flip()
@@ -829,45 +956,32 @@ class Environment:
         if options is not None:
             self.cfg.update(options)
         self._build_world()
+        self._refresh_initial_telemetry()
+        self._controller_timer = 0.0
+        self._controller_last_command = None
+        if self._controller is not None:
+            self._update_controller_period()
+            self._controller.reset()
+        self._controller_enabled_last_step = bool(self._controller and self._controller.enabled)
+        self._controller_hud = self._resolve_hud_labels()
         return self._get_obs()
 
     # ------------------------------------------------------------------
     def _get_obs(self) -> Dict:
         """Assemble the observation dict for the current state."""
 
-        speed = float(np.linalg.norm(self.car.body.vel))
-        fwd = self.car.body.rot.rotate(np.array([0, 0, 1]))
-        v_ego = float(np.dot(self.car.body.vel, fwd))
-        roll_axis = self.car.body.rot.rotate(np.array([0, 1, 0]))
-        roll = float(math.atan2(roll_axis[0], roll_axis[1]))
-
-        obs = {
-            "current": {
-                "speed": speed,
-                "lateral_acc": 0.0,  # Placeholder for future extension
-                "vEgo": v_ego,
-                "aEgo": 0.0,
-                "roll": roll,
-            },
-            "target": {
-                "speed": self.plan.get("target_speed", 0.0),
-                "lateral_acc": 0.0,
-                "vEgo": 0.0,
-                "aEgo": 0.0,
-                "roll": 0.0,
-            },
-        }
-        return obs
+        return self._telemetry.as_observation()
 
     # ------------------------------------------------------------------
-    def step(self, action: Dict[str, float], events=None):
+    def step(self, command: DriverCommand | Dict[str, float] | None = None, events=None):
         """Advance the simulation by one step.
 
         Parameters
         ----------
-        action:
-            Dictionary with ``steer``, ``accel`` and ``brake`` values in the
-            range ``[-1,1]`` / ``[0,1]``.
+        command:
+            ``DriverCommand`` instance or legacy dictionary with ``steer``,
+            ``accel`` and ``brake`` entries.  When ``None`` the command defaults
+            to zero.
         events:
             Optional iterable of pygame events to process for keybinds when in
             evaluation mode.  If ``None`` the function will poll ``pygame``
@@ -914,9 +1028,56 @@ class Environment:
             if self.camera_mode == 3:
                 self._update_free_camera(pygame)
 
-        self.car.steer = float(action.get("steer", 0.0))
-        self.car.accel = float(action.get("accel", 0.0))
-        self.car.brake = float(action.get("brake", 0.0))
+        if self.car is None:
+            raise RuntimeError("Environment must be reset before stepping.")
+
+        manual_cmd = (
+            command
+            if isinstance(command, DriverCommand)
+            else DriverCommand.from_action(command)
+        ).clipped()
+
+        controller_preview = None
+        controller_enabled = self._controller is not None and self._controller.enabled
+        if controller_enabled:
+            controller_preview = self._controller.preview_rate_hz
+            if not self._controller_enabled_last_step:
+                self._controller_last_command = None
+                self._controller_timer = 0.0
+        telemetry_before = self._build_snapshot(
+            self._prev_velocity,
+            preview_hz=controller_preview,
+        )
+
+        applied_cmd = manual_cmd
+        if controller_enabled:
+            period = self._controller_period or self.dt
+            self._controller_timer += self.dt
+            needs_update = (
+                self._controller_last_command is None
+                or self._controller_timer >= max(period - 1e-9, 0.0)
+            )
+            if needs_update:
+                applied_cmd = (
+                    self._controller
+                    .step(telemetry_before, manual_cmd)
+                    .clipped()
+                )
+                self._controller_last_command = applied_cmd
+                self._controller_timer = 0.0
+            else:
+                applied_cmd = self._controller_last_command or manual_cmd
+        else:
+            self._controller_last_command = None
+            self._controller_timer = 0.0
+
+        self._last_driver_command = applied_cmd
+        self._controller_hud = self._resolve_hud_labels()
+        self._controller_enabled_last_step = controller_enabled
+
+        self.car.steer = float(applied_cmd.steer)
+        self.car.accel = float(applied_cmd.throttle)
+        self.car.brake = float(applied_cmd.brake)
 
         if self.wind_system is not None:
             self.wind_sample = self.wind_system.update(self.dt)
@@ -929,6 +1090,7 @@ class Environment:
             self.car.show_wind_vectors = self.wind_vectors_enabled
 
         sub_dt = self.dt / self.substeps
+        velocity_before = self.car.body.vel.copy()
         for _ in range(self.substeps):
             self.car.update(sub_dt)
             events = getattr(self.car, "slip_events", [])
@@ -937,6 +1099,8 @@ class Environment:
         self.step_count += 1
         self.time += self.dt
 
+        self._telemetry = self._build_snapshot(velocity_before)
+        self._prev_velocity = self.car.body.vel.copy()
         obs = self._get_obs()
 
         # Cost-first logic: each step incurs a time cost.  Reward is negative
@@ -975,7 +1139,11 @@ class Environment:
             "step_cost": step_cost,
             "episode_cost": self.episode_cost,
             "plan": self.plan,
+            "driver_command": self._last_driver_command.as_dict(),
+            "telemetry": self._telemetry.as_observation(),
         }
+        if self._controller is not None and self._controller.enabled:
+            info["controller"] = self._controller.name
         if terminated:
             info["reason"] = self.termination_reason
         elif truncated:

@@ -8,7 +8,7 @@ import threading
 import numpy as np
 import pygame
 
-from sim.environment import Environment
+from src.sim.environment import Environment
 
 # Visual constants
 BG_COLOR = (0, 0, 0)

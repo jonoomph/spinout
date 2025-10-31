@@ -20,6 +20,8 @@ def render_hud(
     wind_direction_deg: float = 0.0,
     wind_label: str = "Calm",
     wind_vectors_enabled: bool = False,
+    controller_name: str = "No Controller",
+    steer_label: str = "Manual Steer",
 ) -> None:
     """
     Draw a slim top-bar HUD onto hud_surf.
@@ -164,7 +166,9 @@ def render_hud(
 
     # right cluster: steer, mode, camera
     x_right, y = w - 10, 10
-    steer_txt = f"Steer: {math.degrees(steer_angle):.1f}°"
+    steer_txt = (
+        f"{controller_name}: {steer_label}: {math.degrees(steer_angle):.1f}°"
+    )
     surf_steer = font_small.render(steer_txt, True, (255, 255, 255))
     rect_steer = surf_steer.get_rect(topright=(x_right, y))
     hud_surf.blit(surf_steer, rect_steer)

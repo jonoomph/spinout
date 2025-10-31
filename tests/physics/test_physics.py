@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 
 # Allow running tests directly from repository root
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
 from src.sim.environment import Environment
 
@@ -313,7 +313,7 @@ def run_test_visual(env: Environment, accel_expected, brake_expected):
     return accel_time, brake_time
 
 
-with open(os.path.join(os.path.dirname(__file__), "../data/cars.json")) as f:
+with open(os.path.join(os.path.dirname(__file__), "../../data/cars.json")) as f:
     CARS = json.load(f)
 
 
