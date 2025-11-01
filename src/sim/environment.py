@@ -227,8 +227,8 @@ class Environment:
         right = self.car.body.rot.rotate(np.array([1, 0, 0]))
         speed = float(np.linalg.norm(vel))
         v_ego = float(np.dot(vel, fwd))
-        lat_vel = float(np.dot(vel, right))
-        lat_acc = float(np.dot(accel, right))
+        lat_vel_right = float(np.dot(vel, right))
+        lat_acc_right = float(np.dot(accel, right))
         long_acc = float(np.dot(accel, fwd))
         roll_axis = self.car.body.rot.rotate(np.array([0, 1, 0]))
         roll = float(math.atan2(roll_axis[0], roll_axis[1]))
@@ -236,11 +236,17 @@ class Environment:
         yaw = float(math.atan2(fwd[0], fwd[2]))
         yaw_rate = float(np.dot(self.car.body.angvel, np.array([0.0, 1.0, 0.0])))
 
-        centripetal = v_ego * yaw_rate
-        if abs(lat_acc) < abs(centripetal) * 0.25:
-            lat_acc = centripetal
+        # Keep all intermediate blending in the "right-hand" frame so the
+        # existing heuristics continue to behave the same.  Afterwards convert
+        # back to a left-positive convention so the telemetry matches the road
+        # planner, which treats positive lateral quantities as "left of path".
+        centripetal_right = -v_ego * yaw_rate
+        if abs(lat_acc_right) < abs(centripetal_right) * 0.25 or lat_acc_right * centripetal_right <= 0:
+            lat_acc_right = centripetal_right
         else:
-            lat_acc = 0.5 * (lat_acc + centripetal)
+            lat_acc_right = 0.5 * (lat_acc_right + centripetal_right)
+        lat_vel = -lat_vel_right
+        lat_acc = -lat_acc_right
         return VehicleState(
             speed=speed,
             v_ego=v_ego,
@@ -1100,7 +1106,13 @@ class Environment:
         self.time += self.dt
 
         self._telemetry = self._build_snapshot(velocity_before)
-        self._prev_velocity = self.car.body.vel.copy()
+        # ``_prev_velocity`` should always contain the velocity from the start
+        # of the last physics step so that the next controller tick observes
+        # the most recent acceleration.  This ensures that lateral acceleration
+        # reported to controllers reflects the change in velocity that occurred
+        # during the previous update rather than the (already updated) current
+        # velocity, which would otherwise appear as zero acceleration.
+        self._prev_velocity = velocity_before
         obs = self._get_obs()
 
         # Cost-first logic: each step incurs a time cost.  Reward is negative
