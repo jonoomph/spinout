@@ -96,6 +96,7 @@ class RenderContext:
         self.hud_vbo = self.ctx.buffer(hud_quad_data.tobytes())
         self.hud_vao = self.ctx.vertex_array(self.prog2d, self.hud_vbo, 'in_pos', 'in_tex')
         self.hud_tex = None
+        self.hud_tex_size = None
         self.main_vbo = None
         self.shock_vbo = None
         self.main_vao = None
@@ -1194,14 +1195,31 @@ class RenderContext:
         self.ctx.enable(moderngl.DEPTH_TEST)
         self.ctx.wireframe = was_wireframe
 
-    def render_hud(self, hud_surf):
+    def render_hud(self, hud_surf, dirty_rects=None):
         self.ctx.viewport = (0, 0, self.width, self.height)
-        hud_data = pygame.image.tostring(hud_surf, 'RGBA', True)
-        if self.hud_tex is None:
-            self.hud_tex = self.ctx.texture((self.width, self.height), 4, hud_data)
+
+        surf_w, surf_h = hud_surf.get_size()
+        if self.hud_tex is None or self.hud_tex_size != (surf_w, surf_h):
+            self.hud_tex = self.ctx.texture((surf_w, surf_h), 4)
             self.hud_tex.filter = (moderngl.NEAREST, moderngl.NEAREST)
-        else:
-            self.hud_tex.write(hud_data)
+            blank = b"\x00" * (surf_w * surf_h * 4)
+            self.hud_tex.write(blank)
+            self.hud_tex_size = (surf_w, surf_h)
+
+        rects = dirty_rects or [pygame.Rect(0, 0, surf_w, surf_h)]
+        bounds = pygame.Rect(0, 0, surf_w, surf_h)
+        for rect in rects:
+            r = pygame.Rect(rect).clip(bounds)
+            if r.width == 0 or r.height == 0:
+                continue
+            region = hud_surf.subsurface(r)
+            hud_data = pygame.image.tostring(region, 'RGBA', True)
+            gl_y = surf_h - r.y - r.height
+            self.hud_tex.write(
+                hud_data,
+                viewport=(r.x, gl_y, r.width, r.height),
+            )
+
         was_wireframe = self.ctx.wireframe
         self.ctx.wireframe = False
         self.hud_tex.use(0)

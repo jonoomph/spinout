@@ -914,7 +914,6 @@ class Environment:
             self.render_ctx.render_car(car_lines, mvp)
         self.render_ctx.render_weather(mvp, dt)
 
-        self.hud_surf.fill((0, 0, 0, 0))
         speed_mph = np.linalg.norm(self.car.body.vel) * 2.23694
         fps_r = self.clock.get_fps()
         fps_p = fps_r * self.substeps
@@ -927,7 +926,7 @@ class Environment:
             wind_dir = self.wind_sample.direction_deg
             if wind_speed > 0.05:
                 wind_label = self.wind_sample.compass_label
-        render_hud(
+        dirty_rects = render_hud(
             self.hud_surf,
             self.font_small,
             self.font_big,
@@ -948,7 +947,7 @@ class Environment:
             controller_name=self._controller_hud[0],
             steer_label=self._controller_hud[1],
         )
-        self.render_ctx.render_hud(self.hud_surf)
+        self.render_ctx.render_hud(self.hud_surf, dirty_rects)
         pygame.display.flip()
 
     # ------------------------------------------------------------------
