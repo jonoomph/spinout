@@ -17,7 +17,7 @@ from src.sim.environment import Environment
 from src.sim.planner import PlannerPreviewer
 from tests.helpers import configure_flat_drive_line, ensure_drive_line_layer
 
-VISUALIZE = bool(int(os.environ.get("VISUALIZE", "0")))
+VISUALIZE = bool(int(os.environ.get("VISUALIZE", "1")))
 MPS_TO_MPH = 2.2369362920544
 
 
@@ -212,6 +212,11 @@ def _place_car_with_lateral_offset(env: Environment, center_x: float, offset_m: 
 
 def _run_pid_centering_trial(offset_m: float, target_speed_mph: float = 25.0) -> tuple[bool, str]:
     """Simulate a short run and report whether the PID controller recentres the car."""
+
+    print(
+        f"\n\n=== PID centering trial: offset={offset_m:+.2f} m,"
+        f" target_speed={target_speed_mph:.1f} mph ==="
+    )
 
     mode = "eval" if VISUALIZE else "train"
     env = Environment({"flat": True, "dt": 0.02, "substeps": 1}, mode=mode)

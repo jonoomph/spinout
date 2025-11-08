@@ -23,7 +23,7 @@ class PIDGains:
 
     kp: float = 0.3
     ki: float = 0.07
-    kd: float = -0.1
+    kd: float = 0.25
     integral_limit: float = 1.0
 
 
@@ -39,7 +39,7 @@ class PIDSteeringController(BaseController):
         super().__init__("pid", control_rate_hz=control_rate_hz, preview_rate_hz=control_rate_hz)
         self.gains = gains or PIDGains()
         self.steer_limit = steer_limit
-        self.steer_factor = 13.0
+        self.steer_factor = 9.0
         self.steer_sat_v = 20.0
         self.steer_command_sat = 2.0
         self.lateral_error_gain = 0.6
@@ -128,10 +128,10 @@ class PIDSteeringController(BaseController):
         self._last_target_lat = filtered_target
         target_lat = filtered_target
 
-        error = target_lat - current_lat
+        error = -telemetry.target.lateral_error
         error = self._clip(error, self.max_error)
 
-        pid_factor = max(0.5, 1 - 0.23 * abs(target_lat))
+        pid_factor = 1.0  # max(0.5, 1 - 0.23 * abs(target_lat))
         p_dynamic = max(0.1, self.gains.kp - 0.1 * abs(state.long_accel))
         base_gain = max(self.gains.kp, 1e-6)
         pid_out = (
@@ -145,18 +145,12 @@ class PIDSteeringController(BaseController):
         speed = max(state.v_ego, 1.0)
         steer_cmd = steer_accel_target * self.steer_factor / max(self.steer_sat_v, speed)
         steer_cmd = 2 * self.steer_command_sat / (1 + math.exp(-steer_cmd)) - self.steer_command_sat
-        ff = 0.8 * steer_cmd
+        ff = 0.1 * steer_cmd
 
         steer = self._clip(pid_out + ff, self.steer_command_sat)
         steer = self._clip(steer / self.steer_command_sat, self.steer_limit)
 
         diff_lat_accel = target_lat - current_lat
-
-        # DEBUG steer test
-        if diff_lat_accel > 0.0:
-            steer = 0.25
-        else:
-            steer = -0.25
 
         print(
             f"PID: {steer}, current_lat: {current_lat}, base_target_lat: {base_target_lat}, "

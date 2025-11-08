@@ -154,7 +154,7 @@ class PlannerPreviewer:
             separation = float(np.linalg.norm(pos - point_cand))
             if separation <= max(25.0, abs(lateral_error) + 5.0):
                 self._last_index = idx_cand
-                path_heading = float(math.atan2(tangent_cand[1], tangent_cand[0]))
+                path_heading = float(math.atan2(tangent_cand[0], tangent_cand[1]))
                 return s_candidate, lateral_error, path_heading
 
         segs = pts[1:] - pts[:-1]
@@ -203,7 +203,7 @@ class PlannerPreviewer:
         tangent_norm = tangent / (np.linalg.norm(tangent) + 1e-9)
         normal = np.array([-tangent_norm[1], tangent_norm[0]])
         lateral_error = float(np.dot(pos - proj_point, normal))
-        path_heading = float(math.atan2(tangent_norm[1], tangent_norm[0]))
+        path_heading = float(math.atan2(tangent_norm[0], tangent_norm[1]))
         return s_val, lateral_error, path_heading
 
     def _sample_path(self, s: float) -> tuple[np.ndarray, np.ndarray, int]:
