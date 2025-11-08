@@ -11,11 +11,12 @@ import pytest
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
 
 from src.sim.environment import Environment
+from tests.helpers import configure_flat_drive_line
 
 # Target speeds and tolerances for the 0-60/60-0 tests
 TARGET_SPEED_MPS = 60 * 0.44704  # 60 mph to m/s
 SUCCESS_DIFF = 0.75
-VISUALIZE = int(os.environ.get("VISUALIZE", 0))
+VISUALIZE = bool(int(os.environ.get("VISUALIZE", "0")))
 
 
 def simulate(env: Environment, accel: bool = True) -> float:
@@ -82,6 +83,7 @@ def coast_with_wind(env: Environment, wind_vec, seconds: float = 3.0, speed: flo
     """Reset ``env`` and coast at ``speed`` under a fixed ``wind_vec``."""
 
     env.reset()
+    configure_flat_drive_line(env)
     env.wind_system = None
     env.wind_sample = None
 
@@ -114,6 +116,7 @@ def run_test(car_data, visualize: int = VISUALIZE):
     mode = "eval" if visualize else "train"
     env = Environment(cfg, mode=mode)
     env.reset()
+    configure_flat_drive_line(env)
 
     if visualize:
         return run_test_visual(
@@ -178,6 +181,7 @@ def run_test_visual(env: Environment, accel_expected, brake_expected):
     from src.sim.render import RenderContext
     from src.sim.terrain import build_terrain_triangles
     from src.sim.utils import compute_mvp
+    from src.sim.roads.build import build_road_vertices
 
     pygame.init()
     width, height = 800, 600
@@ -196,6 +200,19 @@ def run_test_visual(env: Environment, accel_expected, brake_expected):
     brake_elapsed = 0.0
     diff_surf_accel = None
     diff_surf_brake = None
+    driveline_vao = None
+    driveline_vbo = None
+    if getattr(env, "rp", None) and getattr(env, "plan", None):
+        try:
+            road_layers = build_road_vertices(env.terrain, env.rp, **env.plan)
+            driveline = road_layers.get("driveline")
+            if driveline is not None and driveline.size:
+                driveline_vbo = render_ctx.ctx.buffer(driveline.tobytes())
+                driveline_vao = render_ctx.ctx.vertex_array(
+                    render_ctx.prog, driveline_vbo, "in_vert", "in_color"
+                )
+        except TypeError:
+            driveline_vao = None
 
     def draw(dt):
         """Render terrain, car and text overlays for the current frame."""
@@ -204,16 +221,19 @@ def run_test_visual(env: Environment, accel_expected, brake_expected):
         car_dir = car.body.rot.rotate(np.array([0, 0, 1]))
         car_up = car.body.rot.rotate(np.array([0, 1, 0]))
         cam_pos = car.body.pos - car_dir * 10 + np.array([0, 3, 0])
-        cam_fwd = -(car.body.pos - cam_pos)
-        cam_fwd /= np.linalg.norm(cam_fwd)
-        cam_right = np.cross(cam_fwd, np.array([0, 1, 0]))
-        cam_right /= np.linalg.norm(cam_right)
-        cam_up = np.cross(cam_right, cam_fwd)
-        cam_up /= np.linalg.norm(cam_up)
+        cam_fwd = car.body.pos - cam_pos
+        cam_fwd /= np.linalg.norm(cam_fwd) + 1e-8
+        world_up = np.array([0, 1, 0])
+        cam_right = np.cross(world_up, cam_fwd)
+        cam_right /= np.linalg.norm(cam_right) + 1e-8
+        cam_up = np.cross(cam_fwd, cam_right)
+        cam_up /= np.linalg.norm(cam_up) + 1e-8
         mvp = compute_mvp(width, height, cam_pos, cam_right, cam_fwd, cam_up)
         render_ctx.set_camera(cam_pos)
         render_ctx.clear()
         render_ctx.render_terrain(t_vao, mvp, render_ctx.road_noise)
+        if driveline_vao is not None:
+            render_ctx.render_terrain(driveline_vao, mvp, 0.0)
         verts = collect_car_vertices(car, car_up, car_dir, dt, wheel_spin)
         render_ctx.render_car(verts, mvp)
         hud_surf.fill((0, 0, 0, 0))
@@ -321,6 +341,7 @@ def _coastdown(car_data, lockup_speed, trans_type="auto"):
     idx = CARS.index(car_data)
     env = Environment({"flat": True, "car_index": idx})
     env.reset()
+    configure_flat_drive_line(env)
     car = env.car
     car.trans_type = trans_type
     car.lockup_speed = lockup_speed
@@ -344,6 +365,7 @@ def _downhill_accel(car_data, grade=0.03, duration=10.0):
     idx = CARS.index(car_data)
     env = Environment({"flat": True, "car_index": idx})
     env.reset()
+    configure_flat_drive_line(env)
     car = env.car
     car.trans_type = "manual"
     target = 30 * 0.44704

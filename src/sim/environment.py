@@ -786,6 +786,8 @@ class Environment:
         if self.car is not None:
             self.car.show_wind_vectors = self.wind_vectors_enabled
 
+        if not pygame.font.get_init():
+            pygame.font.init()
         # Terrain
         tb, _ = build_terrain_triangles(self.terrain)
         self.t_vertices = tb

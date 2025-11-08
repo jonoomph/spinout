@@ -1,4 +1,5 @@
 import math
+import os
 
 import numpy as np
 import pytest
@@ -14,6 +15,10 @@ from src.sim.control_api import (
 )
 from src.sim.environment import Environment
 from src.sim.planner import PlannerPreviewer
+from tests.helpers import configure_flat_drive_line, ensure_drive_line_layer
+
+VISUALIZE = bool(int(os.environ.get("VISUALIZE", "0")))
+MPS_TO_MPH = 2.2369362920544
 
 
 class CountingController(BaseController):
@@ -188,3 +193,91 @@ def test_planner_preview_remains_stable_across_state_changes():
     assert np.array(preview.lat_accel[:5], dtype=float) == pytest.approx(
         baseline_future, rel=1e-6, abs=1e-6
     )
+
+
+def _place_car_with_lateral_offset(env: Environment, center_x: float, offset_m: float) -> None:
+    """Drop the car at the requested lateral offset relative to the driveline."""
+
+    assert env.car is not None and env.terrain is not None
+    z = env.terrain.height * 0.25
+    x = center_x + offset_m
+    y = env.terrain.get_height(x, z) + env.car.cg_height_m
+    env.car.body.pos = np.array([x, y, z], dtype=float)
+    env.car.body.vel[:] = 0.0
+    env.car.body.angvel[:] = 0.0
+    env.car.body.rot.arr[:] = (1.0, 0.0, 0.0, 0.0)
+    env._prev_velocity = env.car.body.vel.copy()  # type: ignore[attr-defined]
+    env._refresh_initial_telemetry()  # type: ignore[attr-defined]
+
+
+def _run_pid_centering_trial(offset_m: float, target_speed_mph: float = 25.0) -> tuple[bool, str]:
+    """Simulate a short run and report whether the PID controller recentres the car."""
+
+    mode = "eval" if VISUALIZE else "train"
+    env = Environment({"flat": True, "dt": 0.02, "substeps": 1}, mode=mode)
+    env.reset()
+    center_x = configure_flat_drive_line(env)
+    if VISUALIZE:
+        env.init_renderer()
+        ensure_drive_line_layer(env)
+    _place_car_with_lateral_offset(env, center_x, offset_m)
+
+    controller = PIDSteeringController()
+    env.attach_controller(controller)
+    controller.enable()
+
+    stable_time = 0.0
+    stable_required = 3.0
+    tolerance_m = 0.3  # ~1 ft band around the driving line
+    max_time = 10.0
+    steps = int(math.ceil(max_time / env.dt))
+    crossed_line = False
+    last_error = abs(offset_m)
+
+    for _ in range(steps):
+        assert env.car is not None
+        speed_mph = np.linalg.norm(env.car.body.vel) * MPS_TO_MPH
+
+        throttle = 0.9 if speed_mph < target_speed_mph else 0.35
+        _, _, terminated, truncated, _ = env.step(DriverCommand(throttle=throttle))
+        assert not terminated, "car left the test terrain unexpectedly"
+        assert not truncated, "simulation truncated before PID could stabilise"
+
+        lateral_error = env.car.body.pos[0] - center_x
+        abs_error = abs(lateral_error)
+        if controller.enabled and not crossed_line and offset_m != 0.0:
+            crossed_line = (lateral_error > 0) != (offset_m > 0)
+        if crossed_line and abs_error > abs(offset_m) + 0.5:
+            env.attach_controller(None)
+            return False, (
+                f"offset={offset_m:.2f} m: crossed driveline but diverged "
+                f"(error {abs_error:.2f} m)"
+            )
+
+        if abs_error <= tolerance_m:
+            stable_time += env.dt
+            if stable_time >= stable_required:
+                env.attach_controller(None)
+                return True, ""
+        else:
+            stable_time = 0.0
+        last_error = abs_error
+
+    env.attach_controller(None)
+    return False, (
+        f"offset={offset_m:.2f} m: failed to centre within {max_time}s "
+        f"(last error {last_error:.2f} m)"
+    )
+
+
+def test_pid_recenters_from_lateral_offsets():
+    """Ensure the PID controller can centre the car from both small and large offsets."""
+
+    offsets_m = (1.0, -1.0, 3.0, -3.0)  # ~3 ft and ~10 ft on both sides
+    failures = []
+    for offset in offsets_m:
+        ok, message = _run_pid_centering_trial(offset)
+        if not ok:
+            failures.append(message)
+    if failures:
+        pytest.fail("\n".join(failures))
