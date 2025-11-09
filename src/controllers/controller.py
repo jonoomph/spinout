@@ -28,6 +28,7 @@ class BaseController:
         self.preview_rate_hz = float(preview_rate_hz) if preview_rate_hz else None
         self.enabled: bool = False
         self.dt: Optional[float] = None
+        self.physics_dt: Optional[float] = None
         self._env = None
 
     # ------------------------------------------------------------------
@@ -37,7 +38,12 @@ class BaseController:
         """Attach the controller to an environment instance."""
 
         self._env = env
-        self.dt = getattr(env, "dt", None)
+        self.physics_dt = getattr(env, "dt", None)
+        rate = max(self.control_rate_hz, 0.0)
+        if rate > 0.0:
+            self.dt = 1.0 / rate
+        else:
+            self.dt = self.physics_dt
         self.on_attach()
 
     def detach(self) -> None:

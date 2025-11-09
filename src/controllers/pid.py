@@ -23,8 +23,8 @@ class PIDGains:
 
     kp: float = 0.3
     ki: float = 0.07
-    kd: float = 0.25
-    integral_limit: float = 1.0
+    kd: float = 1.25
+    integral_limit: float = 1.5
 
 
 class PIDSteeringController(BaseController):
@@ -44,11 +44,11 @@ class PIDSteeringController(BaseController):
         self.steer_command_sat = 2.0
         self.lateral_error_gain = 0.6
         self.heading_error_gain = 1.0
-        self.lateral_velocity_gain = 0.3
+        self.lateral_velocity_gain = 9.5
         self.roll_comp_gain = 0.1
         self.max_target_lat = 4.0
         self.max_error = 4.0
-        self.target_slew_rate = 6.0
+        self.target_slew_rate = 15.0
         self._integral = 0.0
         self._prev_error: Optional[float] = None
         self._step_counter = 0
@@ -102,7 +102,7 @@ class PIDSteeringController(BaseController):
         current_lat = state.lat_accel
         lateral_term = -self.lateral_error_gain * telemetry.target.lateral_error
         heading_term = self.heading_error_gain * telemetry.target.heading_error
-        lat_velocity_term = -self.lateral_velocity_gain * state.lat_velocity
+        lat_velocity_term = self.lateral_velocity_gain * state.lat_velocity
         roll_term = -self.roll_comp_gain * state.roll_lataccel
 
         target_lat = (

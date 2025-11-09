@@ -239,11 +239,33 @@ def _run_pid_centering_trial(offset_m: float, target_speed_mph: float = 25.0) ->
     crossed_line = False
     last_error = abs(offset_m)
 
+    max_speed_mph = 30.0
+    target_speed_mph = min(target_speed_mph, max_speed_mph)
+    throttle_cmd = 0.0
+    throttle_alpha = 0.25  # keep throttle adjustments smooth
+
     for _ in range(steps):
         assert env.car is not None
         speed_mph = np.linalg.norm(env.car.body.vel) * MPS_TO_MPH
 
-        throttle = 0.9 if speed_mph < target_speed_mph else 0.35
+        speed_error = target_speed_mph - speed_mph
+        if speed_mph > max_speed_mph + 2.0:
+            desired_throttle = 0.0  # let the car coast back down
+        elif speed_mph > max_speed_mph + 0.5:
+            desired_throttle = 0.15
+        elif speed_error > 5.0:
+            desired_throttle = 0.8
+        elif speed_error > 2.0:
+            desired_throttle = 0.6
+        elif speed_error > 0.5:
+            desired_throttle = 0.45
+        elif speed_error > -0.5:
+            desired_throttle = 0.3
+        else:
+            desired_throttle = 0.2
+
+        throttle_cmd += throttle_alpha * (desired_throttle - throttle_cmd)
+        throttle = throttle_cmd
         _, _, terminated, truncated, _ = env.step(DriverCommand(throttle=throttle))
         assert not terminated, "car left the test terrain unexpectedly"
         assert not truncated, "simulation truncated before PID could stabilise"
