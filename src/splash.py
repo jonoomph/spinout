@@ -60,7 +60,7 @@ class LogoMotion:
         self.brake_strength = float(config.brake_strength)
 
         env = Environment(
-            cfg={"flat": True, "dt": self.dt, "substeps": 5, "seed": 0},
+            cfg={"flat": True, "dt": self.dt, "substeps": 5},
             mode="train",
         )
         env.reset()
@@ -178,7 +178,7 @@ def _load_environment(progress: Dict[str, float]) -> Tuple[Environment, Dict]:
         progress["target"] = max(progress.get("target", 0.0), p)
 
     env = Environment(
-        cfg={"dt": 1 / 120, "seed": 0},
+        cfg={"dt": 1 / 120},
         mode="eval",
         status_callback=status_cb,
     )
