@@ -178,7 +178,12 @@ def _load_environment(progress: Dict[str, float]) -> Tuple[Environment, Dict]:
         progress["target"] = max(progress.get("target", 0.0), p)
 
     env = Environment(
-        cfg={"dt": 1 / 120},
+        cfg={
+            "dt": 1 / 120,
+            #"weather": "wet",
+            #"precipitation": "rain",
+            #"precipitation_strength": 1.0,
+        },
         mode="eval",
         status_callback=status_cb,
     )
