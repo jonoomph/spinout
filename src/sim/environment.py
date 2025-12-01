@@ -486,6 +486,8 @@ class Environment:
             getattr(self, "precipitation", "none"),
             getattr(self, "precipitation_strength", 0.0),
         )
+        # Refresh fog tint to sky color immediately after weather changes
+        self.render_ctx.regenerate_sky_for_sun()
 
         self.terrain.terrain_type = terrain_type
         self.terrain.color = t["color"]
@@ -826,6 +828,7 @@ class Environment:
             self.render_ctx.set_sun_time_hours(float(self.cfg["sun_time_hours"]))
             self.render_ctx.regenerate_sky_for_sun()
         self.render_ctx.setup_weather(self.weather, self.terrain_type, self.road_type)
+        self.render_ctx.regenerate_sky_for_sun()
         if self.car is not None:
             self.car.show_wind_vectors = self.wind_vectors_enabled
 
