@@ -26,6 +26,7 @@ class RenderContext:
             self.prog_rain,
             self.prog_puddle,
             self.prog_fog_sheet,
+            self.prog_sky,
         ) = create_shaders(self.ctx)
         if 'point_size' in self.prog:
             self.prog['point_size'].value = 1.0
@@ -85,6 +86,23 @@ class RenderContext:
         self._fog_center = self.camera_pos.copy()
         self._fog_scroll = np.zeros(2, dtype='f4')
         self._fog_field_clock = 0.0
+        # Sun/orbit state
+        self.sun_phase = 0.5  # 0..1 → 24h clock
+        self.sun_time_hours = 12.0
+        self.sun_east = np.array([1.0, 0.0, 0.0], dtype="f4")
+        self.sun_north = np.array([0.0, 0.0, 1.0], dtype="f4")
+        self.sun_up = np.array([0.0, 1.0, 0.0], dtype="f4")
+        self.compass_north = self.sun_north.copy()
+        self.compass_east = np.array([1.0, 0.0, 0.0], dtype="f4")
+        self.scene_top_cardinal = "N"
+        self.sun_cardinal = "N"
+        self._sky_overcast = 0.3
+        self._sky_turbidity = 2.0
+        self._sky_day_fac = 1.0
+        self.sun_radius = 400.0
+        self.sun_world = np.zeros(3, dtype="f4")
+        self.debug_vbo = None
+        self.debug_vao = None
         hud_quad_data = np.array([
             0.0, 0.0, 0.0, 0.0,
             1.0, 0.0, 1.0, 0.0,
@@ -109,156 +127,209 @@ class RenderContext:
         self.skid_vbo = None
         self.skid_vao = None
 
-        # sky + stars geometry buffers generated per session
-        self.sky_vbo = None
-        self.sky_vao = None
-        self.stars_vbo = None
-        self.stars_vao = None
-        self._generate_sky()
+        # sky geometry-
+        self._init_sky_mesh()
+        self.sun_vbo = None
+        self.sun_vao = None
+        # headlight state
+        self.headlight_pos = np.zeros((2, 3), dtype="f4")
+        self.headlight_dir = np.array([0.0, 0.0, 1.0], dtype="f4")
+        self.headlight_intensity = 0.0
+        self.headlight_range = 0.0
+        self._current_mvp = None
+        self._sample_sun_state()
         self._init_fog_sheets()
+        # Add this at the end of __init__ (after self._init_sky_mesh() and bef=====================ore self.update_view())
+        aspect = self.width / self.height if self.height else 1.0
+        fov = math.radians(60.0)
+        near, far = 0.1, 10000.0
+        tan_half_fov = math.tan(fov / 2.0)
+        self.projection = np.array([
+            [1.0 / (aspect * tan_half_fov), 0.0, 0.0, 0.0],
+            [0.0, 1.0 / tan_half_fov, 0.0, 0.0],
+            [0.0, 0.0, -(far + near) / (far - near), -1.0],
+            [0.0, 0.0, -(2.0 * far * near) / (far - near), 0.0],
+        ], dtype='f4').T  # transpose to column-major for OpenGL
+        self.update_view()  # initial view
 
-    def _generate_sky(self):
-        """
-        Daylight & twilight only (no full night).
-        Rich, realistic gradients + faint twilight stars.
-        Exports:
-          - self.base_fog_color (horizon RGB)
-          - self.sky_brightness (0..1 approx)
-          - self.sky_vao / self.stars_vao
-        """
-        rng = np.random.default_rng()
+    def _init_sky_mesh(self):
+        # Generate a simple sphere for the sky
+        def generate_sphere(radius=1000.0, slices=32, stacks=16):
+            verts = []
+            for i in range(stacks + 1):
+                theta = math.pi * i / stacks
+                sin_theta = math.sin(theta)
+                cos_theta = math.cos(theta)
+                for j in range(slices):
+                    phi = 2 * math.pi * j / slices
+                    sin_phi = math.sin(phi)
+                    cos_phi = math.cos(phi)
+                    x = cos_phi * sin_theta
+                    y = cos_theta
+                    z = sin_phi * sin_theta
+                    verts.append((x * radius, y * radius, z * radius))
+            indices = []
+            for i in range(stacks):
+                for j in range(slices):
+                    first = (i * slices) + j
+                    second = first + slices
+                    indices.extend([first, second, first + 1])
+                    indices.extend([second, second + 1, first + 1])
+            return np.array(verts, dtype='f4'), np.array(indices, dtype='i4')
 
-        # ---------- choose time bucket (no deep night) ----------
-        # centers near sunrise, morning, noon, afternoon, evening, sunset
-        buckets = np.array([0.22, 0.33, 0.50, 0.60, 0.68, 0.78], dtype="f4")
-        stds = np.array([0.015, 0.035, 0.030, 0.035, 0.030, 0.015], dtype="f4")
-        weights = np.array([1.0, 1.1, 1.4, 1.1, 1.0, 1.0], dtype="f4");
+        sky_verts, sky_inds = generate_sphere()
+        self.sky_vbo = self.ctx.buffer(sky_verts.tobytes())
+        self.sky_ibo = self.ctx.buffer(sky_inds.tobytes())
+        self.sky_vao = self.ctx.vertex_array(self.prog_sky, self.sky_vbo, 'in_vert', index_buffer=self.sky_ibo)
+
+    def update_view(self):
+        self.view = np.eye(4, dtype='f4')
+        self.view[:3, 0] = self.camera_right
+        self.view[:3, 1] = self.camera_up
+        self.view[:3, 2] = -self.camera_forward
+        self.view[:3, 3] = -np.dot(self.camera_right, self.camera_pos), -np.dot(self.camera_up, self.camera_pos), np.dot(self.camera_forward, self.camera_pos)
+        self.view_rot = self.view.copy()
+        self.view_rot[:3, 3] = 0.0
+
+    def set_projection(self, projection):
+        self.projection = projection
+
+    def _rotate_vec(self, v, axis, angle):
+        axis = np.array(axis, dtype="f4")
+        axis /= max(np.linalg.norm(axis), 1e-6)
+        v = np.array(v, dtype="f4")
+        c = math.cos(angle)
+        s = math.sin(angle)
+        return (
+            v * c
+            + np.cross(axis, v) * s
+            + axis * np.dot(axis, v) * (1.0 - c)
+        ).astype("f4")
+
+    def _sample_day_phase(self):
+        """
+        Return a day-biased phase in [0,1) where 0.25=~6am, 0.5=noon, 0.75=6pm.
+        Avoid deep night (11pm-4am) and weight toward daylight.
+        """
+        # Buckets around sunrise, morning, noon, afternoon, evening, late-evening
+        buckets = np.array([0.25, 0.35, 0.50, 0.65, 0.75, 0.88], dtype="f4")
+        stds = np.array([0.020, 0.035, 0.030, 0.035, 0.030, 0.025], dtype="f4")
+        weights = np.array([1.1, 1.2, 1.4, 1.2, 1.0, 0.6], dtype="f4")
         weights /= weights.sum()
-        i = int(rng.choice(len(buckets), p=weights))
-        t = float(np.clip(rng.normal(buckets[i], stds[i]), 0.12, 0.88))  # [0,1), 0.25≈sunrise, 0.75≈sunset
+        i = int(self._rng.choice(len(buckets), p=weights))
+        t = float(self._rng.normal(buckets[i], stds[i]))
+        # Clip out hard night: ignore 11pm-4am
+        t = float(np.clip(t, 4.0 / 24.0, 23.0 / 24.0))
+        return t % 1.0
 
-        # atmosphere knobs (kept conservative so we don’t go gray/flat)
-        overcast = float(np.clip(rng.normal(0.30, 0.18), 0.0, 0.8))  # 0 clear → 0.8 quite cloudy
-        turbidity = float(np.clip(rng.normal(2.0, 0.5), 1.2, 3.5))  # higher = hazier/whiter horizon
+    def _sample_sun_basis(self):
+        """
+        Pick a random orientation for the sun arc: random compass yaw plus small seasonal tilt.
+        """
+        yaw = float(self._rng.uniform(0.0, 2.0 * np.pi))
+        tilt = float(self._rng.uniform(-math.radians(12.0), math.radians(12.0)))
+        east = np.array([math.cos(yaw), 0.0, -math.sin(yaw)], dtype="f4")
+        north = np.array([math.sin(yaw), 0.0, math.cos(yaw)], dtype="f4")
+        up = np.array([0.0, 1.0, 0.0], dtype="f4")
+        if abs(tilt) > 1e-5:
+            up = self._rotate_vec(up, east, tilt)
+            north = self._rotate_vec(north, east, tilt)
+        # Orthonormalize to be safe
+        east /= max(np.linalg.norm(east), 1e-6)
+        north = north - np.dot(north, east) * east
+        north /= max(np.linalg.norm(north), 1e-6)
+        up = np.cross(north, east)
+        up /= max(np.linalg.norm(up), 1e-6)
+        self.sun_east, self.sun_north, self.sun_up = east, north, up
+        # Use same random yaw as the world compass orientation
+        self.compass_east = east.copy()
+        self.compass_north = north.copy()
 
-        # twilight strength around 0.25 / 0.75 (dawn/sunset)
-        tw = float(np.exp(-((t - 0.25) / 0.045) ** 2) + np.exp(-((t - 0.75) / 0.045) ** 2))
-        tw *= (1.0 - overcast)
-        tw = float(np.clip(tw, 0.0, 1.0))
+    def _phase_to_angle(self, phase):
+        # phase 0.25 = sunrise east horizon, 0.5 = noon overhead, 0.75 = sunset west horizon
+        return (phase - 0.25) * 2.0 * np.pi
 
-        # approximate “day factor” from solar elevation (no night clamp)
-        sun_elev = np.sin(t * 2.0 * np.pi)
-        day_fac = float(np.clip(sun_elev, 0.25, 1.0))  # never dim like night
+    def _phase_to_dir(self, phase):
+        sunrise_phase = 6.0 / 24.0
+        sunset_phase = 18.0 / 24.0
+        delta_phase = sunset_phase - sunrise_phase
+        scale = math.pi / delta_phase
+        theta = (phase - sunrise_phase) * scale
+        # Sun position on great-circle arc: east horizon -> overhead -> west horizon
+        sun_pos = (
+            math.cos(theta) * self.sun_east
+            + math.sin(theta) * self.sun_up
+        )
+        sun_pos = sun_pos / max(np.linalg.norm(sun_pos), 1e-6)
+        self.sun_world = sun_pos * float(self.sun_radius)
+        # Light direction points from the scene toward the sun (for shading)
+        return sun_pos.astype("f4")
 
-        # ---------- base clear colors (linear-ish RGB) ----------
-        # Zenith blue strengthens with day, horizon is warm at twilight, cool otherwise.
-        top_clear = np.array([0.10, 0.30 + 0.30 * day_fac, 0.70 + 0.25 * day_fac, 1.0], dtype="f4")
-        horizon_cool = np.array([0.70, 0.86, 1.00, 1.0], dtype="f4")
-        horizon_warm = np.array([1.00, 0.58, 0.36, 1.0], dtype="f4")
-        bottom_clear = np.array([0.86, 0.93, 1.00, 1.0], dtype="f4")  # light ground-scatter
+    def _update_cardinal_labels(self):
+        top = np.array([0.0, 0.0, 1.0], dtype="f4")
+        def _cardinal(vec):
+            v = vec.copy()
+            v[1] = 0.0
+            n = np.linalg.norm(v)
+            if n < 1e-6:
+                return "N"
+            v /= n
+            n_dot = float(np.dot(v, self.compass_north))
+            e_dot = float(np.dot(v, self.compass_east))
+            if abs(n_dot) >= abs(e_dot):
+                return "N" if n_dot >= 0.0 else "S"
+            return "E" if e_dot >= 0.0 else "W"
+        self.scene_top_cardinal = _cardinal(top)
+        self.sun_cardinal = _cardinal(self.light_dir)
 
-        # Blend warm/cool horizon by twilight
-        horizon = horizon_cool * (1.0 - 0.85 * tw) + horizon_warm * (0.85 * tw)
-        top = top_clear.copy()
-        bottom = bottom_clear.copy()
+    def _set_sun_phase(self, phase, keep_atmos=False):
+        self.sun_phase = float(phase % 1.0)
+        self.sun_time_hours = self.sun_phase * 24.0
+        self.light_dir = self._phase_to_dir(self.sun_phase)
+        self._update_cardinal_labels()
+        # Update lighting/sky to follow the new phase
+        self.regenerate_sky_for_sun()
 
-        # ---------- overcast/turbidity ----------
-        oc_top = np.array([0.60, 0.64, 0.69, 1.0], dtype="f4")
-        oc_horizon = np.array([0.72, 0.75, 0.78, 1.0], dtype="f4")
-        oc_bottom = np.array([0.76, 0.78, 0.80, 1.0], dtype="f4")
+    def shift_sun_phase(self, delta, keep_atmos=True):
+        """Move the sun along its orbit by ``delta`` in phase units (0..1)."""
+        self._set_sun_phase(self.sun_phase + delta, keep_atmos=keep_atmos)
 
-        top = top * (1.0 - overcast) + oc_top * overcast
-        horizon = horizon * (1.0 - overcast) + oc_horizon * overcast
-        bottom = bottom * (1.0 - overcast) + oc_bottom * overcast
+    def set_sun_time_hours(self, hour, snap_to_hour=False, keep_atmos=True):
+        """Convenience: set sun position by local time (0–24, 6= sunrise east, 18= sunset west)."""
+        h = float(hour)
+        if snap_to_hour:
+            h = round(h) % 24.0
+        self._set_sun_phase((h / 24.0) % 1.0, keep_atmos=keep_atmos)
 
-        haze = float((turbidity - 1.0) / 3.0);
-        haze = np.clip(haze, 0.0, 1.0)
-        horizon = horizon * (1.0 - 0.18 * haze) + bottom * (0.18 * haze)  # haze pulls horizon toward bottom
-        top = top * (1.0 - 0.06 * haze) + horizon * (0.06 * haze)
+    def _sample_sun_state(self):
+        self._sample_sun_basis()
+        self._sky_overcast = self._rng.uniform(0.0, 0.8)
+        self._sky_turbidity = self._rng.uniform(1.2, 3.5)
+        self._set_sun_phase(self._sample_day_phase())
 
-        # small saturation jitter to keep skies varied (but not neon)
-        sat_jit = float(rng.uniform(-0.04, 0.05) * (1.0 - overcast))
+    def regenerate_sky_for_sun(self):
+        def smoothstep(edge0, edge1, x):
+            t = min(max((x - edge0) / (edge1 - edge0), 0.0), 1.0)
+            return t * t * (3.0 - 2.0 * t)
 
-        def tweak_sat(c):
-            rgb = c[:3]
-            lum = float(np.dot(rgb, [0.2126, 0.7152, 0.0722]))
-            rgb = lum + (rgb - lum) * (1.0 + sat_jit)
-            return np.array([*np.clip(rgb, 0.0, 1.0), 1.0], dtype="f4")
-
-        top, horizon, bottom = tweak_sat(top), tweak_sat(horizon), tweak_sat(bottom)
-
-        # luminance floors so zenith/horizon never go near-black from jitter
-        def ensure_luma(c, min_l):
-            rgb = c[:3].copy()
-            lum = float(np.dot(rgb, [0.2126, 0.7152, 0.0722]))
-            if lum < min_l:
-                rgb = np.clip(rgb + (min_l - lum), 0.0, 1.0)
-            return np.array([*rgb, 1.0], dtype="f4")
-
-        horizon = ensure_luma(horizon, 0.60)
-        top = ensure_luma(top, 0.48)
-
-        # exports used by fog/lighting
-        self.base_fog_color = horizon[:3].astype("f4")
-        self.sky_brightness = float(np.dot(self.base_fog_color, [0.2126, 0.7152, 0.0722]))
-
-        # ---------- banding-free vertical gradient (curved) ----------
-        rows = 64  # smoother than 32, still cheap
-        verts = []
-
-        def lerp(a, b, k):
-            return a * (1.0 - k) + b * k
-
-        # curve shaping: y in [-1,1] → u in [0,1] with extra weight near horizon
-        def curve(u):
-            # cubic smoothstep + slight bias to emphasize color change near horizon
-            u = u * u * (3.0 - 2.0 * u)
-            return np.clip(0.85 * u + 0.15 * u * u, 0.0, 1.0)
-
-        for i in range(rows):
-            y0 = -1.0 + 2.0 * (i / rows)
-            y1 = -1.0 + 2.0 * ((i + 1) / rows)
-            u0 = curve((y0 + 1.0) * 0.5)  # 0 bottom, 0.5 horizon, 1 top
-            u1 = curve((y1 + 1.0) * 0.5)
-
-            # blend: bottom→horizon up to ~0.5, then horizon→top
-            def gc(u):
-                k = np.clip(u * 2.0, 0.0, 1.0)  # 0..1 for bottom→horizon
-                j = np.clip((u - 0.5) * 2.0, 0.0, 1.0)  # 0..1 for horizon→top
-                col = lerp(bottom, horizon, k)
-                col = lerp(col, top, j)
-                return col
-
-            c0 = gc(u0);
-            c1 = gc(u1)
-            verts += [-1.0, y0, 0.0, *c0, 1.0, y0, 0.0, *c0, -1.0, y1, 0.0, *c1,
-                      -1.0, y1, 0.0, *c1, 1.0, y0, 0.0, *c0, 1.0, y1, 0.0, *c1]
-
-        data = np.asarray(verts, dtype="f4")
-        if self.sky_vbo is not None: self.sky_vbo.release()
-        self.sky_vbo = self.ctx.buffer(data.tobytes())
-        self.sky_vao = self.ctx.vertex_array(self.prog, self.sky_vbo, "in_vert", "in_color")
-
-        # ---------- twilight stars (very faint), never on horizon ----------
-        star_factor = (1.0 - overcast) * tw
-        star_count = int(180 * star_factor)  # 0..~180
-        if star_count > 0:
-            xs = rng.uniform(-1.0, 1.0, star_count)
-            ys = rng.uniform(0.20, 1.0, star_count)  # keep off horizon band
-            mags = rng.uniform(0.6, 1.0, star_count) ** 2.0
-            alpha = float(np.clip(0.14 * star_factor, 0.0, 0.18))
-            cols = np.column_stack([mags, mags, mags, np.full(star_count, alpha, dtype="f4")]).astype("f4")
-            v = np.column_stack([xs, ys, np.zeros(star_count, dtype="f4"), cols]).astype("f4").ravel()
-            if self.stars_vbo is not None: self.stars_vbo.release()
-            self.stars_vbo = self.ctx.buffer(v.tobytes())
-            self.stars_vao = self.ctx.vertex_array(self.prog, self.stars_vbo, "in_vert", "in_color")
-        else:
-            self.stars_vbo = None
-            self.stars_vao = None
-
-        # keep fog/lighting in sync with the horizon; weather may tweak later
-        self.fog_color = self.base_fog_color.copy()
-        self.light_color = np.array([0.95, 0.95, 0.92], dtype="f4") * (0.70 + 0.30 * (1.0 - overcast))
+        sun_elev = self.light_dir[1]
+        self.sun_intensity = max(0.0, sun_elev) ** 1.4
+        # Update fog and light color based on sun
+        day_scale = 0.01 + 0.99 * self.sun_intensity
+        day_light = np.array([0.95, 0.95, 0.92], dtype="f4")
+        tw_light = np.array([1.0, 0.5, 0.3], dtype="f4")
+        night_light = np.array([0.1, 0.1, 0.2], dtype="f4")
+        day_fac = smoothstep(-0.1, 0.1, sun_elev)
+        tw_fac = smoothstep(0.0, 0.2, 0.2 - abs(sun_elev + 0.1)) * (1.0 - day_fac)
+        night_fac = 1.0 - day_fac - tw_fac
+        self.light_color = (day_light * day_fac + tw_light * tw_fac + night_light * night_fac) * (0.70 + 0.30 * (1.0 - self._sky_overcast)) * day_scale
+        # Fog color dynamic with smooth blend
+        day_fog = np.array([0.7, 0.8, 1.0], dtype="f4")
+        twilight_fog = np.array([1.0, 0.4, 0.2], dtype="f4")
+        night_fog = np.array([0.01, 0.01, 0.02], dtype="f4")
+        self.base_fog_color = day_fog * day_fac + twilight_fog * tw_fac + night_fog * night_fac
+        self.sky_brightness = np.dot(self.base_fog_color, [0.2126, 0.7152, 0.0722])
+        self.fog_color = self.base_fog_color.copy()  # update fog to match
 
     def _init_fog_sheets(self):
         if self.prog_fog_sheet is None:
@@ -296,12 +367,14 @@ class RenderContext:
             self._rain_anchor = self.camera_pos.copy()
         if not np.any(self._last_camera_pos):
             self._last_camera_pos = self.camera_pos.copy()
+        self.update_view()
 
     def set_camera_pose(self, pos, forward, right, up):
         self.set_camera(pos)
         self.camera_forward = np.array(forward, dtype='f4')
         self.camera_right = np.array(right, dtype='f4')
         self.camera_up = np.array(up, dtype='f4')
+        self.update_view()
 
     def setup_weather(
         self,
@@ -328,12 +401,12 @@ class RenderContext:
         self._last_camera_pos = self.camera_pos.copy()
         self._build_puddle_mesh()
 
-        # Sky brightness from _generate_sky() controls base falloff
-        sky_brightness = getattr(self, "sky_brightness", 1.0)
-        self.fog_density = (1.0 - sky_brightness) * 0.02
+        # Sky brightness from regenerate_sky_for_sun controls base falloff
+        self.regenerate_sky_for_sun()
+        self.fog_density = (1.0 - self.sky_brightness) * 0.02
 
         # Start fog from the sky's horizon tone
-        horizon = np.array(getattr(self, "base_fog_color", FOG_DEFAULT_COLOR), dtype="f4")
+        horizon = self.base_fog_color
 
         # Weather/terrain adjustments
         if self.wetness > 0.0:
@@ -787,7 +860,7 @@ class RenderContext:
 
                         placed_centers.append((cluster_cx, cluster_cz, footprint))
 
-                        avg_height = float(np.mean([v[1] for v in verts])) if verts else h + 0.02
+                        avg_height = float(np.mean([v[1] for v in verts])) if verts else h + 0.01
                         center = (cluster_cx, avg_height + 0.01, cluster_cz, 0.0, 0.0, seed)
 
                         for s in range(segments):
@@ -890,8 +963,10 @@ class RenderContext:
                             local_x = np.cos(angle) * major
                             local_z = np.sin(angle) * minor
                             scale = radii[s]
-                            world_x = cluster_cx + local_x * scale
-                            world_z = cluster_cz + local_z * scale
+                            dx = local_x * scale
+                            dz = local_z * scale
+                            world_x = cluster_cx + dx
+                            world_z = cluster_cz + dz
                             if world_x < 0.0 or world_z < 0.0 or world_x > width or world_z > height:
                                 off_terrain = True
                                 break
@@ -1002,14 +1077,40 @@ class RenderContext:
             prog['light_dir'].value = tuple(self.light_dir)
         if 'light_color' in prog:
             prog['light_color'].value = tuple(self.light_color)
+        if 'ambient_k' in prog:
+            # ambient tracks sun intensity (dimmer at night)
+            sun_up = float(getattr(self, "sun_intensity", 0.0))
+            ambient = 0.002 + 0.18 * sun_up
+            prog['ambient_k'].value = float(ambient)
         if 'sky_brightness' in prog:
             prog['sky_brightness'].value = float(getattr(self, 'sky_brightness', 1.0))
         if 'rain_strength' in prog:
             prog['rain_strength'].value = float(self.rain_intensity)
         if 'rain_time' in prog:
             prog['rain_time'].value = float(self._rain_time)
+        # headlights
+        if 'headlight_dir' in prog:
+            prog['headlight_dir'].value = tuple(self.headlight_dir)
+        if 'headlight_pos0' in prog:
+            prog['headlight_pos0'].value = tuple(self.headlight_pos[0])
+        if 'headlight_pos1' in prog:
+            prog['headlight_pos1'].value = tuple(self.headlight_pos[1])
+        if 'headlight_intensity' in prog:
+            prog['headlight_intensity'].value = float(self.headlight_intensity)
+        if 'headlight_range' in prog:
+            prog['headlight_range'].value = float(self.headlight_range)
+
+    def set_headlights(self, pos_left, pos_right, direction, intensity=1.8, range_m=30.0):
+        self.headlight_pos[0] = np.array(pos_left, dtype="f4")
+        self.headlight_pos[1] = np.array(pos_right, dtype="f4")
+        d = np.array(direction, dtype="f4")
+        n = max(np.linalg.norm(d), 1e-6)
+        self.headlight_dir = d / n
+        self.headlight_intensity = float(intensity)
+        self.headlight_range = float(range_m)
 
     def render_terrain(self, terrain_vao, mvp, noise_scale=0.0, terrain_mode=None):
+        self._current_mvp = mvp
         self.ctx.line_width = 1.0
         prog = terrain_vao.program
         prog['mvp'].write(mvp.T.tobytes())
@@ -1064,8 +1165,6 @@ class RenderContext:
         if self.skid_vbo is None or len(data) > self.skid_vbo.size:
             if self.skid_vbo is not None:
                 self.skid_vbo.release()
-            if self.skid_vao is not None:
-                self.skid_vao.release()
             self.skid_vbo = self.ctx.buffer(data)
             self.skid_vao = self.ctx.vertex_array(
                 self.prog,
@@ -1088,8 +1187,18 @@ class RenderContext:
         main_vertices, shock_vertices = vertices
         self.prog['mvp'].write(mvp.T.tobytes())
         self._apply_common_uniforms(self.prog)
+        # Force wireframe to render bright white regardless of sun lighting
+        if 'ambient_k' in self.prog:
+            self.prog['ambient_k'].value = 1.0
+        if 'light_color' in self.prog:
+            self.prog['light_color'].value = (1.0, 1.0, 1.0)
+        if 'light_dir' in self.prog:
+            self.prog['light_dir'].value = (0.0, 1.0, 0.0)
         if main_vertices:
             main_array = np.array(main_vertices, dtype='f4')
+            main_array = main_array.reshape(-1, 7)
+            main_array[:, 3:7] = 1.0
+            main_array = main_array.ravel()
             main_data = main_array.tobytes()
             if self.main_vbo is None or len(main_data) > self.main_vbo.size:
                 if self.main_vbo:
@@ -1103,6 +1212,9 @@ class RenderContext:
             self.main_vao.render(moderngl.LINES, vertices=vertex_count)
         if shock_vertices:
             shock_array = np.array(shock_vertices, dtype='f4')
+            shock_array = shock_array.reshape(-1, 7)
+            shock_array[:, 3:7] = 1.0
+            shock_array = shock_array.ravel()
             shock_data = shock_array.tobytes()
             if self.shock_vbo is None or len(shock_data) > self.shock_vbo.size:
                 if self.shock_vbo:
@@ -1122,7 +1234,11 @@ class RenderContext:
         if self.ctx.wireframe:
             if not edge_vertices:
                 return
-            data = np.asarray(edge_vertices, 'f4').tobytes()
+            edge_array = np.asarray(edge_vertices, 'f4')
+            edge_array = edge_array.reshape(-1, 7)
+            edge_array[:, 3:7] = 1.0
+            edge_array = edge_array.ravel()
+            data = edge_array.tobytes()
             if self.model_edge_vbo is None or len(data) > self.model_edge_vbo.size:
                 if self.model_edge_vbo:
                     self.model_edge_vbo.release()
@@ -1136,6 +1252,12 @@ class RenderContext:
                 self.model_edge_vbo.write(data, 0)
             self.prog['mvp'].write(mvp.T.tobytes())
             self._apply_common_uniforms(self.prog)
+            if 'ambient_k' in self.prog:
+                self.prog['ambient_k'].value = 1.0
+            if 'light_color' in self.prog:
+                self.prog['light_color'].value = (1.0, 1.0, 1.0)
+            if 'light_dir' in self.prog:
+                self.prog['light_dir'].value = (0.0, 1.0, 0.0)
             self.ctx.line_width = 1.0
             self.model_edge_vao.render(moderngl.LINES)
             return
@@ -1161,39 +1283,87 @@ class RenderContext:
             self.car_model_tex.use(0)
             self.prog_tex['tex'] = 0
         self.model_vao.render(moderngl.TRIANGLES)
+        self.ctx.wireframe = was_wire
+
+    def render_debug_lines(self, vertices, mvp):
+        """Render simple debug lines (pos/color) using the generic program."""
+        if vertices is None:
+            return
+        arr = np.asarray(vertices, dtype="f4")
+        if arr.size == 0:
+            return
+        data = arr.tobytes()
+        if self.debug_vbo is None or len(data) > self.debug_vbo.size:
+            if self.debug_vbo:
+                self.debug_vbo.release()
+            self.debug_vbo = self.ctx.buffer(data)
+            self.debug_vao = self.ctx.vertex_array(
+                self.prog, self.debug_vbo, 'in_vert', 'in_color'
+            )
+        else:
+            self.debug_vbo.write(data)
+        self.prog['mvp'].write(mvp.T.tobytes())
+        # Force unlit bright lines
+        if 'ambient_k' in self.prog:
+            self.prog['ambient_k'].value = 1.0
+        if 'light_color' in self.prog:
+            self.prog['light_color'].value = (1.0, 1.0, 1.0)
+        if 'light_dir' in self.prog:
+            self.prog['light_dir'].value = (0.0, 1.0, 0.0)
+        self.ctx.line_width = 2.0
+        count = int(arr.size // 7)
+        self.debug_vao.render(moderngl.LINES, vertices=count)
 
     def render_skybox(self):
         # Always render the skybox filled even if the main scene uses wireframe
         was_wireframe = self.ctx.wireframe
         self.ctx.wireframe = False
         self.ctx.disable(moderngl.DEPTH_TEST)
-        self.prog['mvp'].write(self.ortho.tobytes())
-
-        # Apply same fog/tint uniforms so the sky is hazed like the scene
-        self._apply_common_uniforms(self.prog)
-
-        if 'cam_pos' in self.prog:
-            # Push sky back so exponential fog actually attenuates it
-            self.prog['cam_pos'].value = (0.0, 0.0, -500.0)  # was -100.0
-
-        if 'wetness' in self.prog:
-            self.prog['wetness'].value = 0.0
-        if 'noise_scale' in self.prog:
-            self.prog['noise_scale'].value = 0.0
-        if 'terrain_mode' in self.prog:
-            self.prog['terrain_mode'].value = 0
-
+        # For sky, use view rotation only (no translation)
+        pv_rot = self.projection @ self.view_rot
+        self.prog_sky['mvp'].write(pv_rot.T.tobytes())
+        self.prog_sky['light_dir'].value = tuple(self.light_dir)
+        self.prog_sky['light_color'].value = tuple(self.light_color)
+        self.prog_sky['ambient_k'].value = 0.002 + 0.18 * self.sun_intensity
+        self.prog_sky['time'].value = self._rain_time
         self.sky_vao.render(moderngl.TRIANGLES)
-
-        if self.stars_vao is not None:
-            if 'point_size' in self.prog:
-                self.prog['point_size'].value = 2.0
-            self.stars_vao.render(moderngl.POINTS)
-            if 'point_size' in self.prog:
-                self.prog['point_size'].value = 1.0
-
         self.ctx.enable(moderngl.DEPTH_TEST)
         self.ctx.wireframe = was_wireframe
+        self._render_sun_marker()
+
+    def _render_sun_marker(self):
+        """Draw a small white circle representing the sun in world space, anchored to the scene."""
+        if self._current_mvp is None:
+            return
+        sun_pos = getattr(self, "sun_world", None)
+        if sun_pos is None or np.linalg.norm(sun_pos) < 1e-4:
+            return
+        pos4 = np.array([sun_pos[0], sun_pos[1], sun_pos[2], 1.0], dtype="f4")
+        clip = self._current_mvp @ pos4
+        if abs(clip[3]) < 1e-5:
+            return
+        ndc = clip[:3] / clip[3]
+        x, y = float(ndc[0]), float(ndc[1])
+        if abs(x) > 1.2 or abs(y) > 1.2:
+            return
+        radius = 0.04
+        segments = 24
+        verts = [x, y, 0.0, 1.0, 1.0, 1.0, 1.0]
+        for i in range(segments + 1):
+            ang = 2.0 * math.pi * (i / segments)
+            vx = x + math.cos(ang) * radius
+            vy = y + math.sin(ang) * radius
+            verts += [vx, vy, 0.0, 1.0, 1.0, 1.0, 1.0]
+        verts = np.array(verts, dtype="f4")
+        if self.sun_vbo is None:
+            self.sun_vbo = self.ctx.buffer(verts.tobytes())
+            self.sun_vao = self.ctx.vertex_array(self.prog, self.sun_vbo, "in_vert", "in_color")
+        else:
+            self.sun_vbo.write(verts.tobytes())
+        was_wire = self.ctx.wireframe
+        self.ctx.wireframe = False
+        self.sun_vao.render(moderngl.TRIANGLE_FAN)
+        self.ctx.wireframe = was_wire
 
     def render_hud(self, hud_surf, dirty_rects=None):
         self.ctx.viewport = (0, 0, self.width, self.height)

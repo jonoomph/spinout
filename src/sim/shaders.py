@@ -32,6 +32,16 @@ uniform float noise_scale;  // >0 asphalt/gravel, <0 concrete
 uniform int terrain_mode;   // 0 none, 1 grass, 2 dirt/sand, 3 snow
 uniform float rain_strength;
 uniform float rain_time;
+uniform float ambient_k;
+uniform vec3  light_dir;
+uniform vec3  light_color;
+uniform vec3  headlight_pos0;
+uniform vec3  headlight_pos1;
+uniform vec3  headlight_dir;
+uniform float headlight_intensity;
+uniform float headlight_range;
+uniform float grade_min_y;
+uniform float grade_max_y;
 
 out vec4 fragColor;
 
@@ -50,6 +60,15 @@ float fbm(vec2 p){
     float v=0.0, amp=0.6;
     for(int i=0;i<4;i++){ v+=amp*valueNoise(p); p*=2.0; amp*=0.5; }
     return v;
+}
+
+// exp2 fog with mild height bias, reduced at low ambient (night)
+float fogFactor(float d, float density, float y){
+    float dens = max(density * (0.5 + 0.5 * ambient_k), 0.0); // lighten fog impact at night
+    float heightBias = clamp(0.20 * exp(-0.02 * max(y, 0.0)), 0.0, 0.20);
+    float dd = d * (1.0 + heightBias);
+    float f = exp(-dens * dens * dd * dd);
+    return clamp(f, 0.0, 1.0);
 }
 
 void main() {
@@ -73,7 +92,7 @@ void main() {
     if (scale > 0.0) {
         vec2 P = v_pos.xz * scale * 0.1;
         float n = fbm(P) - 0.5;
-        float amp = (noise_scale < 0.0) ? 0.35 : 0.25; // concrete a bit stronger
+        float amp = (noise_scale < 0.0) ? 0.35 : 0.25;
         base *= 1.0 + n * amp;
         if (noise_scale < 0.0) base *= 0.9;
     }
@@ -102,9 +121,53 @@ void main() {
         base += vec3(0.11, 0.14, 0.17) * glint * (0.12 + 0.30 * rain);
     }
 
-    // clean exp fog toward horizon tint
-    float f = exp(-fog_density * dist);
-    vec3 outCol = mix(fog_color, base, f);
+    // simple lighting: assume up-facing normal
+    vec3 L = normalize(light_dir);
+    float ndotl = clamp(L.y, 0.0, 1.0);
+    vec3 lit = base * (ambient_k + ndotl) * light_color;
+
+    // add twin headlights
+    vec3 Hdir = normalize(headlight_dir);
+    float hl = 0.0;
+    vec3 pos = v_pos;
+    vec3 H0 = headlight_pos0;
+    vec3 H1 = headlight_pos1;
+    for (int i = 0; i < 2; ++i) {
+        vec3 hp = (i == 0) ? H0 : H1;
+        vec3 toL = pos - hp;
+        float distL = length(toL);
+        if (distL < headlight_range && distL > 0.001) {
+            vec3 Lh = toL / distL;
+            float spot = max(dot(Lh, Hdir), 0.0);
+            float att = pow(max(0.0, 1.0 - distL / headlight_range), 2.0);
+            float face = max(abs(dot(vec3(0.0, 1.0, 0.0), Hdir)), 0.25);
+            hl += spot * att * face;
+        }
+    }
+    lit += base * (headlight_intensity * hl);
+
+    // height grade (subtle)
+    float gmin = (grade_min_y == 0.0 && grade_max_y == 0.0) ? -10.0 : grade_min_y;
+    float gmax = (grade_min_y == 0.0 && grade_max_y == 0.0) ?  50.0 : grade_max_y;
+    float t = clamp((v_pos.y - gmin) / max(gmax - gmin, 0.001), 0.0, 1.0);
+    lit *= mix(0.96, 1.06, t);
+
+    // snow fog rule (optional)
+    float dens = fog_density;
+    if (terrain_mode == 3) {
+        if (wetness < 0.001) {
+            dens = 0.0;      // dry snow => no fog
+        } else {
+            dens *= 0.5;     // wet snow => reduce fog so it is not a whiteout
+        }
+    }
+
+    // clean exp2 fog toward horizon tint
+    float f = fogFactor(dist, dens, v_pos.y);
+    vec3  out_linear = mix(fog_color, lit, f);
+
+    // gamma out
+    vec3 outCol = pow(max(out_linear, 0.0), vec3(1.0/2.2));
     fragColor = vec4(outCol, color.a);
 }
 '''
@@ -120,6 +183,12 @@ uniform vec3 light_dir;
 uniform vec3 light_color;
 uniform vec3 cam_pos;
 uniform float wetness;
+uniform float ambient_k;
+uniform vec3  headlight_pos0;
+uniform vec3  headlight_pos1;
+uniform vec3  headlight_dir;
+uniform float headlight_intensity;
+uniform float headlight_range;
 
 out vec4 color;
 out float dist;
@@ -136,8 +205,27 @@ void main() {
     float w = clamp(wetness, 0.0, 1.0);
     vec3 albedo = in_color.rgb * mix(1.0, 0.85, w);
 
-    float ambient = 0.25;
+    float ambient = ambient_k;
     vec3 lambert = albedo * (ambient + 0.75 * NdotL) * light_color;
+
+    // headlights
+    vec3 Hdir = normalize(headlight_dir);
+    float hl = 0.0;
+    vec3 H0 = headlight_pos0;
+    vec3 H1 = headlight_pos1;
+    for (int i = 0; i < 2; ++i) {
+        vec3 hp = (i == 0) ? H0 : H1;
+        vec3 toL = in_vert - hp;
+        float distL = length(toL);
+        if (distL < headlight_range && distL > 0.001) {
+            vec3 Lh = toL / distL;
+            float spot = max(dot(Lh, Hdir), 0.0);
+            float att = pow(max(0.0, 1.0 - distL / headlight_range), 2.0);
+            float face = max(abs(dot(N, Hdir)), 0.25);
+            hl += spot * att * face;
+        }
+    }
+    lambert += albedo * (headlight_intensity * hl);
 
     vec3 V = normalize(cam_pos - in_vert);
     vec3 R = reflect(-L, N);
@@ -165,6 +253,12 @@ uniform float noise_scale;   // >0 asphalt/gravel, <0 concrete
 uniform int   terrain_mode;  // 0 none, 1 grass, 2 dirt/sand, 3 snow
 uniform float rain_strength;
 uniform float rain_time;
+uniform float ambient_k;
+uniform vec3  headlight_pos0;
+uniform vec3  headlight_pos1;
+uniform vec3  headlight_dir;
+uniform float headlight_intensity;
+uniform float headlight_range;
 
 // Optional controls (defaults if unset)
 uniform float grade_min_y;   // default: -10 if unset
@@ -190,9 +284,9 @@ float fbm(vec2 p){
     return v;
 }
 
-// exp2 fog with mild height bias
+// exp2 fog with mild height bias, reduced at low ambient (night)
 float fogFactor(float d, float density, float y){
-    float dens = max(density, 0.0);
+    float dens = max(density * (0.5 + 0.5 * ambient_k), 0.0); // lighten fog impact at night
     float heightBias = clamp(0.20 * exp(-0.02 * max(y, 0.0)), 0.0, 0.20);
     float dd = d * (1.0 + heightBias);
     float f = exp(-dens * dens * dd * dd);
@@ -331,11 +425,29 @@ uniform float wetness;
 uniform float fog_density;
 uniform vec3  fog_color;
 
+uniform vec3 light_dir;
+uniform vec3 light_color;
+uniform float ambient_k;
+uniform vec3  headlight_pos0;
+uniform vec3  headlight_pos1;
+uniform vec3  headlight_dir;
+uniform float headlight_intensity;
+uniform float headlight_range;
+
 // Optional controls
 uniform float grade_min_y;  // default: -10 if unset
 uniform float grade_max_y;  // default:  50 if unset
 
 out vec4 fragColor;
+
+// exp2 fog with mild height bias, reduced at low ambient (night)
+float fogFactor(float d, float density, float y){
+    float dens = max(density * (0.5 + 0.5 * ambient_k), 0.0); // lighten fog impact at night
+    float heightBias = clamp(0.20 * exp(-0.02 * max(y, 0.0)), 0.0, 0.20);
+    float dd = d * (1.0 + heightBias);
+    float f = exp(-dens * dens * dd * dd);
+    return clamp(f, 0.0, 1.0);
+}
 
 void main() {
     vec4 s = texture(tex, v_tex);
@@ -344,15 +456,40 @@ void main() {
     float w = clamp(wetness, 0.0, 1.0);
     vec3 base = s.rgb * mix(1.0, 0.88, w);
 
+    // simple lighting using a flat normal facing +Z
+    vec3 N = vec3(0.0, 0.0, 1.0);
+    vec3 L = normalize(light_dir);
+    float ndotl = max(dot(N, L), 0.0);
+    vec3 lit = base * (ambient_k + ndotl) * light_color;
+
+    // headlights contribution
+    vec3 Hdir = normalize(headlight_dir);
+    float hl = 0.0;
+    vec3 H0 = headlight_pos0;
+    vec3 H1 = headlight_pos1;
+    for (int i = 0; i < 2; ++i) {
+        vec3 hp = (i == 0) ? H0 : H1;
+        vec3 toL = v_pos - hp;
+        float distL = length(toL);
+        if (distL < headlight_range && distL > 0.001) {
+            vec3 Lh = toL / distL;
+            float spot = max(dot(Lh, Hdir), 0.0);
+            float att = pow(max(0.0, 1.0 - distL / headlight_range), 2.0);
+            float face = max(abs(dot(N, Hdir)), 0.25);
+            hl += spot * att * face;
+        }
+    }
+    lit += base * (headlight_intensity * hl);
+
     // mild height grade
     float gmin = (grade_min_y == 0.0 && grade_max_y == 0.0) ? -10.0 : grade_min_y;
     float gmax = (grade_min_y == 0.0 && grade_max_y == 0.0) ?  50.0 : grade_max_y;
     float t = clamp((v_pos.y - gmin) / max(gmax - gmin, 0.001), 0.0, 1.0);
-    base *= mix(0.97, 1.05, t);
+    lit *= mix(0.97, 1.05, t);
 
     // clean exp2 fog toward horizon tint
-    float f = exp(-fog_density * fog_density * dist * dist);
-    vec3 out_linear = mix(fog_color, base, f);
+    float f = fogFactor(dist, fog_density, v_pos.y);
+    vec3 out_linear = mix(fog_color, lit, f);
 
     // gamma out
     vec3 col = pow(max(out_linear, 0.0), vec3(1.0/2.2));
@@ -580,6 +717,8 @@ uniform vec3 fog_color;
 uniform float fog_density;
 uniform float rain_strength;
 uniform float time;
+uniform vec3 light_dir;
+uniform vec3 light_color;
 
 out vec4 fragColor;
 
@@ -667,7 +806,120 @@ void main() {
     vec3 tint = mix(fog_color, fog_color * (0.75 + 0.35 * layers), 0.55);
     tint += fog_color * (0.06 + 0.10 * rain) * band;
 
+    vec3 V = normalize(cam_pos - v_world);
+    vec3 L = normalize(light_dir);
+    float dotVL = dot(V, L);
+    float scatter = pow(max(dotVL, 0.0), 8.0) * 0.4;
+    tint += light_color * scatter;
+
     fragColor = vec4(clamp(tint, 0.0, 1.0), alpha);
+}
+'''
+
+vertex_shader_sky = '''
+#version 330
+in vec3 in_vert;
+uniform mat4 mvp;
+out vec3 v_view_dir;
+void main() {
+    v_view_dir = in_vert;  // assume in_vert is world-space direction from camera
+    vec4 pos = mvp * vec4(in_vert * 1000.0, 1.0);  // scale large for far clip
+    gl_Position = pos.xyww;  // force depth to 1.0 (far plane)
+}
+'''
+
+fragment_shader_sky = '''
+#version 330
+in vec3 v_view_dir;
+uniform vec3 light_dir;
+uniform vec3 light_color;
+uniform float ambient_k;
+uniform float time;
+uniform float seed;
+out vec4 fragColor;
+
+float hash(vec3 p) {
+    p = fract(p * 0.3183099 + 0.1);
+    p *= 17.0;
+    return fract(p.x * p.y * p.z * (p.x + p.y + p.z));
+}
+
+float noise(vec3 x) {
+    vec3 i = floor(x);
+    vec3 f = fract(x);
+    f = f * f * (3.0 - 2.0 * f);
+    return mix(mix(mix(hash(i + vec3(0, 0, 0)), hash(i + vec3(1, 0, 0)), f.x),
+                   mix(hash(i + vec3(0, 1, 0)), hash(i + vec3(1, 1, 0)), f.x), f.y),
+               mix(mix(hash(i + vec3(0, 0, 1)), hash(i + vec3(1, 0, 1)), f.x),
+                   mix(hash(i + vec3(0, 1, 1)), hash(i + vec3(1, 1, 1)), f.x), f.y), f.z);
+}
+
+float fbm(vec3 p) {
+    float v = 0.0;
+    float a = 0.5;
+    for (int i = 0; i < 5; ++i) {
+        v += a * noise(p);
+        p *= 2.0;
+        a *= 0.5;
+    }
+    return v;
+}
+
+vec3 getSkyColor(vec3 dir) {
+    vec3 d = normalize(dir);
+    float sunDot = dot(d, light_dir);
+    float moonDot = dot(d, -light_dir);  // moon opposite sun
+    float height = max(d.y, 0.0);
+    float sunHeight = light_dir.y;
+
+    // Smooth factors
+    float dayFac = smoothstep(-0.1, 0.1, sunHeight);
+    float twilightFac = smoothstep(0.0, 0.2, 0.2 - abs(sunHeight + 0.1)) * (1.0 - dayFac);
+    float nightFac = 1.0 - dayFac - twilightFac;
+
+    vec3 color = vec3(0.0);
+    // Day colors
+    vec3 dayHorizon = vec3(0.7, 0.8, 1.0);
+    vec3 dayZenith = vec3(0.2, 0.4, 0.8);
+    vec3 dayColor = mix(dayHorizon, dayZenith, pow(height, 0.5));
+
+    // Twilight colors
+    vec3 twHorizon = mix(vec3(1.0, 0.4, 0.2), vec3(0.6, 0.2, 0.4), smoothstep(-0.2, 0.0, sunHeight));
+    vec3 twZenith = vec3(0.1, 0.1, 0.3);
+    vec3 twColor = mix(twHorizon, twZenith, pow(height, 0.8));
+    twColor += light_color * pow(max(-sunHeight, 0.0), 2.0) * 0.5;  // glow near horizon
+
+    // Night colors
+    vec3 nightHorizon = vec3(0.01, 0.01, 0.02);
+    vec3 nightZenith = vec3(0.0, 0.0, 0.05);
+    vec3 nightColor = mix(nightHorizon, nightZenith, height);
+
+    // Blend
+    color = dayColor * dayFac + twColor * twilightFac + nightColor * nightFac;
+
+    // Sun disk
+    float sunDisk = smoothstep(0.998, 0.9995, sunDot) * dayFac;
+    color += light_color * sunDisk * 2.0;
+
+    // Moon disk
+    float moonDisk = smoothstep(0.994, 0.9955, moonDot) * nightFac;
+    color += vec3(0.8, 0.8, 0.7) * moonDisk * 0.6;
+
+    // Stars
+    float starVis = nightFac + twilightFac * 0.3;
+    if (starVis > 0.01) {
+        vec3 starCoord = d * (200.0 + seed * 10.0);  // vary scale with seed
+        float stars = fbm(starCoord + vec3(time * 0.01 + seed));  // subtle twinkle + seed offset
+        stars = smoothstep(0.85 - seed * 0.05, 1.0, stars) * clamp(ambient_k * 2.0, 0.0, 1.0);
+        color += vec3(1.0, 1.0, 0.95) * stars * starVis;
+    }
+
+    return color;
+}
+
+void main() {
+    vec3 color = getSkyColor(v_view_dir);
+    fragColor = vec4(pow(color, vec3(1.0 / 2.2)), 1.0);  // gamma
 }
 '''
 
@@ -680,7 +932,8 @@ def create_shaders(ctx):
         prog_rain = ctx.program(vertex_shader=rain_vertex_shader, fragment_shader=rain_fragment_shader)
         prog_puddle = ctx.program(vertex_shader=puddle_vertex_shader, fragment_shader=puddle_fragment_shader)
         prog_fog = ctx.program(vertex_shader=fog_sheet_vertex_shader, fragment_shader=fog_sheet_fragment_shader)
+        prog_sky = ctx.program(vertex_shader=vertex_shader_sky, fragment_shader=fragment_shader_sky)
         print("Shaders compiled successfully")
-        return prog, prog2d, prog_lit, prog_tex, prog_rain, prog_puddle, prog_fog
+        return prog, prog2d, prog_lit, prog_tex, prog_rain, prog_puddle, prog_fog, prog_sky
     except Exception as e:
         print(f"Shader compilation error: {e}")

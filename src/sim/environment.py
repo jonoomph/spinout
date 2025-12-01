@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import math
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Dict, Optional, Tuple
 from itertools import product
@@ -158,6 +159,7 @@ class Environment:
         self.free_cam_yaw = 0.0
         self.free_cam_pitch = 0.0
         self.free_cam_speed = 20.0
+        self._sun_hold_accum = 0.0
         self.road_layers: dict[str, tuple] = {}
 
         # Window dimensions (populated when the renderer initialises)
@@ -605,6 +607,38 @@ class Environment:
             up_vec /= up_norm
         return forward, right, up_vec
 
+    def _update_sun_controls(self, pygame_module):
+        """Move sun along its orbit while '+' / '-' are held."""
+        if not getattr(self, "render_ctx", None):
+            return
+        keys = pygame_module.key.get_pressed()
+        rate_minutes = 120.0  # minutes per second while held (12 steps of 10 min each)
+        plus_pressed = (
+            keys[getattr(pygame_module, "K_PLUS", pygame_module.K_EQUALS)]
+            or keys[getattr(pygame_module, "K_EQUALS", pygame_module.K_EQUALS)]
+            or keys[getattr(pygame_module, "K_KP_PLUS", pygame_module.K_KP_PLUS)]
+        )
+        minus_pressed = (
+            keys[getattr(pygame_module, "K_MINUS", pygame_module.K_MINUS)]
+            or keys[getattr(pygame_module, "K_KP_MINUS", pygame_module.K_KP_MINUS)]
+        )
+        direction = 0.0
+        if plus_pressed:
+            direction += 1.0
+        if minus_pressed:
+            direction -= 1.0
+        if direction == 0.0:
+            self._sun_hold_accum = 0.0
+            return
+        self._sun_hold_accum += self.dt * rate_minutes * direction
+        step = int(self._sun_hold_accum / 10.0)  # 10-minute steps
+        if step != 0:
+            self._sun_hold_accum -= step * 10.0
+            delta_hours = (step * 10.0) / 60.0
+            new_hour = (self.render_ctx.sun_time_hours + delta_hours) % 24.0
+            self.render_ctx.set_sun_time_hours(new_hour, snap_to_hour=False, keep_atmos=True)
+            self.render_ctx.regenerate_sky_for_sun()
+
     def _enter_free_camera(self):
         if self.car is None:
             return
@@ -782,6 +816,15 @@ class Environment:
         pygame.display.set_caption("Spinout")
         self.clock = pygame.time.Clock()
         self.render_ctx = RenderContext(self.width, self.height)
+        # Optional: align sun to configured/local time instead of random sample
+        if self.cfg.get("sun_use_local_time"):
+            now = datetime.now()
+            hour = now.hour + now.minute / 60.0 + now.second / 3600.0
+            self.render_ctx.set_sun_time_hours(hour)
+            self.render_ctx.regenerate_sky_for_sun()
+        elif "sun_time_hours" in self.cfg:
+            self.render_ctx.set_sun_time_hours(float(self.cfg["sun_time_hours"]))
+            self.render_ctx.regenerate_sky_for_sun()
         self.render_ctx.setup_weather(self.weather, self.terrain_type, self.road_type)
         if self.car is not None:
             self.car.show_wind_vectors = self.wind_vectors_enabled
@@ -890,6 +933,37 @@ class Environment:
         self.render_ctx.set_camera_pose(cam_pos, forward, right, up_vec)
         self.render_ctx.set_mode(self.render_mode)
         self.render_ctx.clear()
+        # Update headlight placement (rough car front offsets)
+        car_right = self.car.body.rot.rotate(np.array([1, 0, 0]))
+        half_width = float(self.car.dimensions.get("width", 1.6) * 0.5)
+        half_length = float(self.car.dimensions.get("length", 4.0) * 0.5)
+        half_height = float(self.car.dimensions.get("height", 1.2) * 0.5)
+        # Anchor headlights on the front face, half-way up the body in car-local space
+        base_local = np.array(
+            [0.0, float(self.car.body_offset + 0.5 * half_height), half_length],
+            dtype=float,
+        )
+        head_base = self.car.body.pos + self.car.body.rot.rotate(base_local)
+        lateral = min(0.7, half_width * 0.85)
+        left = head_base - car_right * lateral
+        right = head_base + car_right * lateral
+        # Slight downward tilt relative to the car so beams hit nearby ground while staying car-aligned
+        tilt_rad = math.radians(3.0)
+        beam_dir = car_dir * math.cos(tilt_rad) - car_up_vec * math.sin(tilt_rad)
+        beam_dir /= max(np.linalg.norm(beam_dir), 1e-6)
+        self.render_ctx.set_headlights(left, right, beam_dir, intensity=1.6, range_m=28.0)
+        # Debug: draw headlight direction lines
+        debug_len = 6.0
+        tip_left = left + beam_dir * debug_len
+        tip_right = right + beam_dir * debug_len
+        debug_color = [1.0, 1.0, 1.0, 1.0]
+        debug_lines = [
+            *left, *debug_color,
+            *tip_left, *debug_color,
+            *right, *debug_color,
+            *tip_right, *debug_color,
+        ]
+        self.render_ctx.render_debug_lines(np.array(debug_lines, dtype="f4"), mvp)
 
         self.render_ctx.render_terrain(self.t_vao, mvp, self.render_ctx.road_noise)
         for name in ("skirt", "deck", "lines", "driveline"):
@@ -928,6 +1002,23 @@ class Environment:
             wind_dir = self.wind_sample.direction_deg
             if wind_speed > 0.05:
                 wind_label = self.wind_sample.compass_label
+        sun_time = getattr(self.render_ctx, "sun_time_hours", None)
+        sun_card = getattr(self.render_ctx, "sun_cardinal", "")
+        top_card = getattr(self.render_ctx, "scene_top_cardinal", "")
+        sun_az = None
+        light_dir = getattr(self.render_ctx, "light_dir", None)
+        if light_dir is not None:
+            az = math.degrees(math.atan2(light_dir[0], light_dir[2]))
+            sun_az = (az + 360.0) % 360.0
+        # heading relative to randomized compass basis
+        comp_n = getattr(self.render_ctx, "compass_north", np.array([0.0, 0.0, 1.0]))
+        comp_e = getattr(self.render_ctx, "compass_east", np.array([1.0, 0.0, 0.0]))
+        heading_deg = math.degrees(
+            math.atan2(
+                float(np.dot(car_dir, comp_e)),
+                float(np.dot(car_dir, comp_n)),
+            )
+        )
         dirty_rects = render_hud(
             self.hud_surf,
             self.font_small,
@@ -948,6 +1039,11 @@ class Environment:
             wind_vectors_enabled=self.wind_vectors_enabled,
             controller_name=self._controller_hud[0],
             steer_label=self._controller_hud[1],
+            sun_time_hours=sun_time,
+            sun_cardinal=sun_card,
+            scene_top_cardinal=top_card,
+            sun_azimuth_deg=sun_az,
+            heading_deg=heading_deg,
         )
         self.render_ctx.render_hud(self.hud_surf, dirty_rects)
         pygame.display.flip()
@@ -1034,6 +1130,7 @@ class Environment:
 
             if self.camera_mode == 3:
                 self._update_free_camera(pygame)
+            self._update_sun_controls(pygame)
 
         if self.car is None:
             raise RuntimeError("Environment must be reset before stepping.")
