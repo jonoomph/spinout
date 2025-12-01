@@ -952,18 +952,6 @@ class Environment:
         beam_dir = car_dir * math.cos(tilt_rad) - car_up_vec * math.sin(tilt_rad)
         beam_dir /= max(np.linalg.norm(beam_dir), 1e-6)
         self.render_ctx.set_headlights(left, right, beam_dir, intensity=1.6, range_m=28.0)
-        # Debug: draw headlight direction lines
-        debug_len = 6.0
-        tip_left = left + beam_dir * debug_len
-        tip_right = right + beam_dir * debug_len
-        debug_color = [1.0, 1.0, 1.0, 1.0]
-        debug_lines = [
-            *left, *debug_color,
-            *tip_left, *debug_color,
-            *right, *debug_color,
-            *tip_right, *debug_color,
-        ]
-        self.render_ctx.render_debug_lines(np.array(debug_lines, dtype="f4"), mvp)
 
         self.render_ctx.render_terrain(self.t_vao, mvp, self.render_ctx.road_noise)
         for name in ("skirt", "deck", "lines", "driveline"):

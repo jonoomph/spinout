@@ -118,7 +118,8 @@ def collect_car_vertices(car, car_up, car_dir, dt, wheel_spin_accum):
             p2 = points_lists[1][i]
             main_vertices.extend(list(p1) + tire_color)
             main_vertices.extend(list(p2) + tire_color)
-        wheel_spin_accum[idx] = spin_angle + wheel.ang_vel * dt
+        # Flip sign so visual spin matches forward travel direction
+        wheel_spin_accum[idx] = spin_angle - wheel.ang_vel * dt
 
         shock_start = hub_pos + car_up * wheel.radius
         shock_end = shock_start + car_up * suspension_length
