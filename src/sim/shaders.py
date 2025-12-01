@@ -910,7 +910,10 @@ vec3 getSkyColor(vec3 dir) {
     if (starVis > 0.01) {
         vec3 starCoord = d * (200.0 + seed * 10.0);  // vary scale with seed
         float stars = fbm(starCoord + vec3(time * 0.01 + seed));  // subtle twinkle + seed offset
-        stars = smoothstep(0.85 - seed * 0.05, 1.0, stars) * clamp(ambient_k * 2.0, 0.0, 1.0);
+        // Slightly lower threshold and boost near-horizon so stars show in driving FOV
+        stars = smoothstep(0.78 - seed * 0.05, 1.0, stars);
+        float horizon_boost = 1.0 + (1.0 - max(d.y, 0.0)) * 0.5;
+        stars *= horizon_boost * (1.0 + ambient_k * 0.2);
         color += vec3(1.0, 1.0, 0.95) * stars * starVis;
     }
 
