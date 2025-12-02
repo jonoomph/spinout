@@ -28,6 +28,8 @@ in vec3  v_pos;
 uniform float wetness;
 uniform float fog_density;
 uniform vec3  fog_color;
+uniform vec3  cam_pos;
+uniform float sky_brightness;
 uniform float noise_scale;  // >0 asphalt/gravel, <0 concrete
 uniform int terrain_mode;   // 0 none, 1 grass, 2 dirt/sand, 3 snow
 uniform float rain_strength;
@@ -121,10 +123,31 @@ void main() {
         base += vec3(0.11, 0.14, 0.17) * glint * (0.12 + 0.30 * rain);
     }
 
-    // simple lighting: assume up-facing normal
+    // wet-road shine: random roughness per patch, zero when dry
+    vec2 shine_uv = v_pos.xz * 0.12;
+    float shiny_seed = valueNoise(shine_uv + vec2(rain_time * 0.15, -rain_time * 0.11));
+    float wet_mask = smoothstep(0.02, 0.35, clamp(wetness + rain * 0.45, 0.0, 1.0));
+    float shininess = (wet_mask > 0.0) ? mix(0.25, 1.0, shiny_seed) : 0.0;
+
+    // slightly tilt the normal so spec highlights show even with flat geometry
+    float micro_n = valueNoise(shine_uv * 2.7 + vec2(1.3, -0.8)) - 0.5;
+    float micro_m = valueNoise(shine_uv * 3.1 + vec2(-0.6, 2.2)) - 0.5;
+    vec3 normal = normalize(vec3(micro_n * 0.08 * wet_mask, 1.0, micro_m * 0.08 * wet_mask));
+    vec3 view_dir = normalize(cam_pos - v_pos);
     vec3 L = normalize(light_dir);
-    float ndotl = clamp(L.y, 0.0, 1.0);
-    vec3 lit = base * (ambient_k + ndotl) * light_color;
+    float ndotl = clamp(dot(normal, L), 0.0, 1.0);
+
+    float spec_power = mix(22.0, 120.0, shininess);
+    float spec_boost = wet_mask * shininess;
+    float spec_term = pow(max(dot(reflect(-L, normal), view_dir), 0.0), spec_power);
+    vec3 specular = light_color * spec_term * (0.16 + 0.70 * spec_boost) * wet_mask;
+    float fresnel = pow(1.0 - max(dot(normal, view_dir), 0.0), 5.0);
+    vec3 sky_tint = mix(fog_color, light_color * (1.05 + 0.35 * sky_brightness), 0.55);
+    float env_intensity = (0.22 + 0.65 * spec_boost) * wet_mask;
+    vec3 env_reflect = sky_tint * fresnel * env_intensity;
+
+    // simple lighting: assume up-facing normal
+    vec3 lit = base * (ambient_k + ndotl) * light_color + specular + env_reflect;
 
     // add twin headlights
     vec3 Hdir = normalize(headlight_dir);
