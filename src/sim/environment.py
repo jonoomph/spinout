@@ -242,7 +242,7 @@ class Environment:
         # existing heuristics continue to behave the same.  Afterwards convert
         # back to a left-positive convention so the telemetry matches the road
         # planner, which treats positive lateral quantities as "left of path".
-        centripetal_right = -v_ego * yaw_rate
+        centripetal_right = v_ego * yaw_rate
         if abs(lat_acc_right) < abs(centripetal_right) * 0.25 or lat_acc_right * centripetal_right <= 0:
             lat_acc_right = centripetal_right
         else:

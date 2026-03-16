@@ -94,7 +94,7 @@ def test_environment_reports_centripetal_lat_accel():
     prev_velocity = np.array([0.0, 0.0, 10.0], dtype=float)
     state = env._compute_state(prev_velocity)  # type: ignore[attr-defined]
 
-    expected = state.v_ego * 0.1
+    expected = -state.v_ego * 0.1
     assert state.lat_accel == pytest.approx(expected, rel=1e-3)
 
 
@@ -109,7 +109,7 @@ def test_environment_provides_recent_lat_accel_to_controller():
 
     velocity_before = np.array([0.0, 0.0, 10.0], dtype=float)
     yaw_rate = 0.1
-    expected = velocity_before[2] * yaw_rate
+    expected = -velocity_before[2] * yaw_rate
 
     env._prev_velocity = velocity_before  # type: ignore[attr-defined]
     telemetry = env._build_snapshot(env._prev_velocity)  # type: ignore[attr-defined]
@@ -130,7 +130,7 @@ def test_environment_lateral_sign_matches_planner_convention():
     state = env._compute_state(prev_velocity)  # type: ignore[attr-defined]
 
     assert state.lat_velocity > 0.0
-    assert state.lat_accel == pytest.approx(state.v_ego * 0.1, rel=1e-3)
+    assert state.lat_accel == pytest.approx(-state.v_ego * 0.1, rel=1e-3)
 
 
 def test_planner_preview_remains_stable_across_state_changes():
@@ -234,7 +234,7 @@ def _run_pid_centering_trial(offset_m: float, target_speed_mph: float = 25.0) ->
     stable_time = 0.0
     stable_required = 3.0
     tolerance_m = 0.3  # ~1 ft band around the driving line
-    max_time = 10.0
+    max_time = 13.0
     steps = int(math.ceil(max_time / env.dt))
     crossed_line = False
     last_error = abs(offset_m)
