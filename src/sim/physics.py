@@ -373,6 +373,10 @@ class Car:
         # speed-sensitive limiting (speed at which the limit halves).
         self.max_steer_angle = math.radians(car_data.get("steer_angle_deg", 30))
         self.speed_steer_scale = car_data.get("steering_speed_scale", 10.0)
+        # Steering filter rate (s⁻¹).  τ = 1/rate.  Default 20 → τ=50 ms.
+        # Real EPS systems: 25–50 s⁻¹ (τ≈20–40 ms).
+        self.steering_rate = car_data.get("steering_rate", 20.0)
+        self.wheelbase_m = wheelbase
 
         # Tire stiffness controls how quickly forces saturate with slip and slip angle.
         tire_stiffness = car_data.get("tire_stiffness", {})
@@ -665,7 +669,7 @@ class Car:
             steer_limit = self.max_steer_angle / (1 + speed / self.speed_steer_scale)
             target = -self.steer * steer_limit
             wheel.target_steer = np.clip(target, -steer_limit, steer_limit)
-            wheel.steer_angle += (wheel.target_steer - wheel.steer_angle) * 5 * dt
+            wheel.steer_angle += (wheel.target_steer - wheel.steer_angle) * self.steering_rate * dt
         else:
             wheel.steer_angle = 0
         local_fwd = np.array(

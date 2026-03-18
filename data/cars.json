@@ -77,7 +77,8 @@
     },
     "driveline_drag_nm_s": 0.20,
     "bearing_drag_nm_s": 0.07,
-    "brake_pad_drag_nm": 2.5
+    "brake_pad_drag_nm": 2.5,
+    "steering_rate": 25.0
   },
   {
     "category": "mid_size_sedan",
@@ -165,7 +166,8 @@
     },
     "driveline_drag_nm_s": 0.22,
     "bearing_drag_nm_s": 0.07,
-    "brake_pad_drag_nm": 2.5
+    "brake_pad_drag_nm": 2.5,
+    "steering_rate": 25.0
   },
   {
     "category": "full_size_sedan",
@@ -251,7 +253,8 @@
     },
     "driveline_drag_nm_s": 0.25,
     "bearing_drag_nm_s": 0.07,
-    "brake_pad_drag_nm": 2.5
+    "brake_pad_drag_nm": 2.5,
+    "steering_rate": 22.0
   },
   {
     "category": "truck",
@@ -339,7 +342,8 @@
     },
     "driveline_drag_nm_s": 0.55,
     "bearing_drag_nm_s": 0.09,
-    "brake_pad_drag_nm": 3.0
+    "brake_pad_drag_nm": 3.0,
+    "steering_rate": 15.0
   },
   {
     "category": "sports_car",
@@ -426,7 +430,8 @@
     },
     "driveline_drag_nm_s": 0.30,
     "bearing_drag_nm_s": 0.08,
-    "brake_pad_drag_nm": 2.7
+    "brake_pad_drag_nm": 2.7,
+    "steering_rate": 35.0
   },
   {
     "category": "full_size_SUV",
@@ -510,6 +515,7 @@
     },
     "driveline_drag_nm_s": 0.55,
     "bearing_drag_nm_s": 0.09,
-    "brake_pad_drag_nm": 3.0
+    "brake_pad_drag_nm": 3.0,
+    "steering_rate": 18.0
   }
 ]

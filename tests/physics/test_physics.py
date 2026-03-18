@@ -112,7 +112,7 @@ def run_test(car_data, visualize: int = VISUALIZE):
     """Return measured 0→60 and 60→0 times for ``car_data``."""
 
     idx = CARS.index(car_data)
-    cfg = {"flat": True, "car_index": idx}
+    cfg = {"flat": True, "car_index": idx, "sun_time_hours": 12.0}
     mode = "eval" if visualize else "train"
     env = Environment(cfg, mode=mode)
     env.reset()
