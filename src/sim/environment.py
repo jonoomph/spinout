@@ -97,6 +97,10 @@ class Environment:
         ``dt`` (float):      Size of each simulation step in seconds.
         ``substeps`` (int):  Number of physics sub-steps per step.
         ``realtime`` (bool): In eval mode, pace simulation against wall clock.
+        ``max_realtime_steps_per_frame`` (int | None): Eval-only cap on how
+                             many fixed sim steps a single interactive frame
+                             may execute to catch up after a hitch. ``None``
+                             or values below 1 disable the cap.
         ``max_steps`` (int): Maximum number of steps per episode.
         ``time_limit`` (float): Optional wall clock time limit for an episode.
         ``cost_limit`` (float): Optional accumulated cost limit for an episode.
@@ -143,6 +147,14 @@ class Environment:
 
         self.dt = float(dt_value)
         self.realtime = bool(self.cfg.get("realtime", self.mode == "eval"))
+        max_realtime_steps_cfg = self.cfg.get("max_realtime_steps_per_frame")
+        if max_realtime_steps_cfg is None:
+            self.max_realtime_steps_per_frame = 4 if self.mode == "eval" else None
+        else:
+            max_realtime_steps = int(max_realtime_steps_cfg)
+            self.max_realtime_steps_per_frame = (
+                max_realtime_steps if max_realtime_steps >= 1 else None
+            )
         self.max_steps = (
             int(self.cfg["max_steps"]) if "max_steps" in self.cfg else None
         )
@@ -172,6 +184,7 @@ class Environment:
         self._controller_enabled_last_step = False
         self._render_accum = 0.0
         self._realtime_anchor: Optional[float] = None
+        self._last_realtime_steps_dropped = 0
 
         # Rendering state ------------------------------------------------------
         self.render_mode = 1
@@ -1153,6 +1166,7 @@ class Environment:
     def _eval_step_budget(self) -> int:
         """Return how many fixed simulation steps to execute this call."""
 
+        self._last_realtime_steps_dropped = 0
         if not self.realtime or self.dt <= 0.0:
             return 1
 
@@ -1168,6 +1182,13 @@ class Environment:
 
         lag = now - target
         steps = 1 + int(lag / self.dt)
+        cap = self.max_realtime_steps_per_frame
+        if cap is not None and steps > cap:
+            self._last_realtime_steps_dropped = steps - cap
+            # Interactive mode should recover cleanly after a hitch rather
+            # than burst through a large backlog and feel like fast-forward.
+            self._realtime_anchor = now - (self.time + cap * self.dt)
+            return cap
         return steps
 
     def _advance_once(self, manual_cmd: DriverCommand):
@@ -1378,6 +1399,8 @@ class Environment:
         if steps_ran > 1:
             info["step_cost"] = self.dt * steps_ran
             info["sim_steps"] = steps_ran
+        if self._last_realtime_steps_dropped > 0:
+            info["realtime_steps_dropped"] = self._last_realtime_steps_dropped
 
         if self.mode == "eval" and getattr(self, "render_ctx", None):
             render_period = 0.0 if self.render_fps <= 0.0 else 1.0 / self.render_fps

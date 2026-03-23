@@ -92,6 +92,49 @@ def test_eval_defaults_can_derive_dt_and_substeps_from_rates():
     assert env.substeps == 5
 
 
+def test_eval_realtime_step_budget_is_capped_and_rebased(monkeypatch):
+    env = Environment(
+        {
+            "render_fps": 60.0,
+            "physics_hz": 300.0,
+            "max_realtime_steps_per_frame": 4,
+        },
+        mode="eval",
+    )
+    env.time = 1.0
+    env._realtime_anchor = 0.0  # type: ignore[attr-defined]
+
+    lagged_now = env.time + env.dt + 10.2 * env.dt
+    monkeypatch.setattr("src.sim.environment.time.perf_counter", lambda: lagged_now)
+
+    steps = env._eval_step_budget()  # type: ignore[attr-defined]
+
+    assert steps == 4
+    assert env._last_realtime_steps_dropped == 7  # type: ignore[attr-defined]
+    assert env._realtime_anchor == pytest.approx(lagged_now - (env.time + steps * env.dt))  # type: ignore[attr-defined]
+
+
+def test_eval_realtime_step_budget_can_remain_unbounded(monkeypatch):
+    env = Environment(
+        {
+            "render_fps": 60.0,
+            "physics_hz": 300.0,
+            "max_realtime_steps_per_frame": 0,
+        },
+        mode="eval",
+    )
+    env.time = 1.0
+    env._realtime_anchor = 0.0  # type: ignore[attr-defined]
+
+    lagged_now = env.time + env.dt + 3.2 * env.dt
+    monkeypatch.setattr("src.sim.environment.time.perf_counter", lambda: lagged_now)
+
+    steps = env._eval_step_budget()  # type: ignore[attr-defined]
+
+    assert steps == 4
+    assert env._last_realtime_steps_dropped == 0  # type: ignore[attr-defined]
+
+
 def test_pid_reacts_to_lateral_error():
     snapshot = TelemetrySnapshot(
         state=VehicleState(v_ego=15.0, lat_velocity=0.0, lat_accel=0.0),
