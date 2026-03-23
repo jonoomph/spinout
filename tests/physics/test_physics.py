@@ -17,6 +17,7 @@ from tests.helpers import configure_flat_drive_line
 TARGET_SPEED_MPS = 60 * 0.44704  # 60 mph to m/s
 SUCCESS_DIFF = 0.75
 VISUALIZE = bool(int(os.environ.get("VISUALIZE", "0")))
+TEST_SUN_TIME_HOURS = 12.0
 
 
 def simulate(env: Environment, accel: bool = True) -> float:
@@ -112,7 +113,14 @@ def run_test(car_data, visualize: int = VISUALIZE):
     """Return measured 0→60 and 60→0 times for ``car_data``."""
 
     idx = CARS.index(car_data)
-    cfg = {"flat": True, "car_index": idx, "sun_time_hours": 12.0}
+    cfg = {
+        "flat": True,
+        "car_index": idx,
+        "sun_time_hours": TEST_SUN_TIME_HOURS,
+        "dt": 0.01,
+    }
+    if visualize:
+        cfg["realtime"] = False
     mode = "eval" if visualize else "train"
     env = Environment(cfg, mode=mode)
     env.reset()
@@ -143,7 +151,7 @@ def run_test(car_data, visualize: int = VISUALIZE):
 
 class TestWindEffects:
     def test_affects_longitudinal_speed(self):
-        env = Environment({"flat": True}, mode="train")
+        env = Environment({"flat": True, "sun_time_hours": TEST_SUN_TIME_HOURS}, mode="train")
 
         base_vel, _delta, base_forward = coast_with_wind(
             env, [0.0, 0.0, 0.0], seconds=3.0
@@ -163,7 +171,7 @@ class TestWindEffects:
         assert tail_speed > base_speed + 0.05
 
     def test_crosswind_deflects_vehicle(self):
-        env = Environment({"flat": True}, mode="train")
+        env = Environment({"flat": True, "sun_time_hours": TEST_SUN_TIME_HOURS}, mode="train")
 
         pos_west = coast_with_wind(env, [20.0, 0.0, 0.0], seconds=5.0)[1]
         pos_east = coast_with_wind(env, [-20.0, 0.0, 0.0], seconds=5.0)[1]
@@ -187,7 +195,10 @@ def run_test_visual(env: Environment, accel_expected, brake_expected):
     width, height = 800, 600
     pygame.display.set_mode((width, height), pygame.OPENGL | pygame.DOUBLEBUF)
     clock = pygame.time.Clock()
+    frame_rate = max(1, int(round(1.0 / env.dt)))
     render_ctx = RenderContext(width, height)
+    render_ctx.set_sun_time_hours(float(env.cfg.get("sun_time_hours", TEST_SUN_TIME_HOURS)))
+    render_ctx.regenerate_sky_for_sun()
     render_ctx.set_mode(1)
     render_ctx.setup_weather("dry", env.terrain.terrain_type, "asphalt")
     t_basic, _ = build_terrain_triangles(env.terrain)
@@ -267,51 +278,66 @@ def run_test_visual(env: Environment, accel_expected, brake_expected):
         pygame.display.flip()
 
     time_elapsed = 0.0
-    env.car.accel = 1
-    env.car.brake = 0
+    accel_cmd = {"steer": 0.0, "throttle": 1.0, "brake": 0.0}
+    prev_speed = np.linalg.norm(env.car.body.vel)
     while np.linalg.norm(env.car.body.vel) < TARGET_SPEED_MPS and time_elapsed < 60:
-        dt = clock.tick(60) / 1000.0
+        clock.tick(frame_rate)
+        frame_events = []
         for event in pygame.event.get():
+            frame_events.append(event)
             if event.type == pygame.QUIT:
                 pygame.quit()
                 return 0.0, 0.0
-        for _ in range(env.substeps):
-            env.car.update(dt / env.substeps)
-        draw(dt)
-        time_elapsed += dt
+        _obs, _reward, _terminated, _truncated, info = env.step(
+            accel_cmd, events=frame_events
+        )
+        sim_dt = info.get("step_cost", env.dt)
+        curr_speed = np.linalg.norm(env.car.body.vel)
+        time_elapsed += sim_dt
+        if prev_speed < TARGET_SPEED_MPS <= curr_speed:
+            span = (curr_speed - prev_speed) + 1e-8
+            ratio = (TARGET_SPEED_MPS - prev_speed) / span
+            time_elapsed -= sim_dt * (1 - ratio)
+            accel_elapsed = time_elapsed
+            draw(sim_dt)
+            break
+        draw(sim_dt)
         accel_elapsed = time_elapsed
+        prev_speed = curr_speed
     accel_time = time_elapsed
 
     diff_a = accel_time - accel_expected
     color_a = (0, 200, 0) if abs(diff_a) <= SUCCESS_DIFF else (200, 0, 0)
     diff_surf_accel = font.render(f"{diff_a:+.2f}s", True, color_a)
 
-    env.car.accel = 0
     for _ in range(5):
-        for _ in range(env.substeps):
-            env.car.update(0.002 / env.substeps)
-        draw(0.002)
+        env.step({"steer": 0.0, "throttle": 0.0, "brake": 0.0})
+        draw(env.dt)
 
     time_elapsed = 0.0
-    env.car.brake = 1
+    brake_cmd = {"steer": 0.0, "throttle": 0.0, "brake": 1.0}
     fwd = env.car.body.rot.rotate(np.array([0, 0, 1]))
     prev_fwd = np.dot(env.car.body.vel, fwd)
     while prev_fwd > 0 and time_elapsed < 60:
-        dt = clock.tick(60) / 1000.0
+        clock.tick(frame_rate)
+        frame_events = []
         for event in pygame.event.get():
+            frame_events.append(event)
             if event.type == pygame.QUIT:
                 pygame.quit()
                 return accel_time, time_elapsed
-        for _ in range(env.substeps):
-            env.car.update(dt / env.substeps)
+        _obs, _reward, _terminated, _truncated, info = env.step(
+            brake_cmd, events=frame_events
+        )
+        sim_dt = info.get("step_cost", env.dt)
         curr_fwd = np.dot(env.car.body.vel, fwd)
-        draw(dt)
-        time_elapsed += dt
+        draw(sim_dt)
+        time_elapsed += sim_dt
         brake_elapsed = time_elapsed
         if prev_fwd > 0 and curr_fwd <= 0:
             span = abs(curr_fwd - prev_fwd) + 1e-8
             ratio = abs(prev_fwd) / span
-            time_elapsed -= dt * (1 - ratio)
+            time_elapsed -= sim_dt * (1 - ratio)
             brake_elapsed = time_elapsed
             draw(0)
             break
@@ -328,7 +354,7 @@ def run_test_visual(env: Environment, accel_expected, brake_expected):
                 pygame.quit()
                 return accel_time, brake_time
         draw(0)
-        clock.tick(60)
+        clock.tick(frame_rate)
     pygame.quit()
     return accel_time, brake_time
 
@@ -339,7 +365,9 @@ with open(os.path.join(os.path.dirname(__file__), "../../data/cars.json")) as f:
 
 def _coastdown(car_data, lockup_speed, trans_type="auto"):
     idx = CARS.index(car_data)
-    env = Environment({"flat": True, "car_index": idx})
+    env = Environment(
+        {"flat": True, "car_index": idx, "sun_time_hours": TEST_SUN_TIME_HOURS}
+    )
     env.reset()
     configure_flat_drive_line(env)
     car = env.car
@@ -363,7 +391,9 @@ def _coastdown(car_data, lockup_speed, trans_type="auto"):
 
 def _downhill_accel(car_data, grade=0.03, duration=10.0):
     idx = CARS.index(car_data)
-    env = Environment({"flat": True, "car_index": idx})
+    env = Environment(
+        {"flat": True, "car_index": idx, "sun_time_hours": TEST_SUN_TIME_HOURS}
+    )
     env.reset()
     configure_flat_drive_line(env)
     car = env.car

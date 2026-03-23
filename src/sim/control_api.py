@@ -58,10 +58,11 @@ class DriverCommand:
         """Build a command from the legacy mapping or a compatible object.
 
         ``game.py`` used to pass dictionaries with ``{"steer", "accel", "brake"}``
-        entries.  Some call sites now pass :class:`DriverCommand` instances or
-        other small containers with ``steer``, ``throttle`` and ``brake``
-        attributes.  The helper accepts any of these shapes to keep the API
-        forgiving while the rest of the codebase is updated.
+        entries. Some newer call sites use ``throttle`` instead of ``accel``.
+        Others pass :class:`DriverCommand` instances or small containers with
+        ``steer``, ``throttle`` and ``brake`` attributes. The helper accepts
+        any of these shapes to keep the API forgiving while the rest of the
+        codebase is updated.
         """
 
         if not action:
@@ -77,9 +78,13 @@ class DriverCommand:
                 brake=float(getattr(action, "brake")),
             )
 
+        throttle = action.get("throttle")
+        if throttle is None:
+            throttle = action.get("accel", 0.0)
+
         return cls(
             steer=float(action.get("steer", 0.0)),
-            throttle=float(action.get("accel", 0.0)),
+            throttle=float(throttle),
             brake=float(action.get("brake", 0.0)),
         )
 
