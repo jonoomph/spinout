@@ -74,6 +74,8 @@ class PIDSteeringController(BaseController):
         self._last_d_term: float = 0.0
         self._last_pid_out: float = 0.0
         self._last_ff: float = 0.0
+        self._last_de_dt: float = 0.0
+        self._last_integral_state: float = 0.0
 
     def reset(self) -> None:  # type: ignore[override]
         self._integral = 0.0
@@ -82,6 +84,7 @@ class PIDSteeringController(BaseController):
         self._last_lateral_term = self._last_pid_error = 0.0
         self._last_p_term = self._last_i_term = self._last_d_term = 0.0
         self._last_pid_out = self._last_ff = 0.0
+        self._last_de_dt = self._last_integral_state = 0.0
 
     def on_disable(self) -> None:  # type: ignore[override]
         self.reset()
@@ -141,5 +144,7 @@ class PIDSteeringController(BaseController):
         self._last_pid_out = correction
         self._last_ff = ff
         self._last_lateral_term = correction
+        self._last_de_dt = de_dt
+        self._last_integral_state = self._integral
 
         return DriverCommand(steer=steer, throttle=manual.throttle, brake=manual.brake)

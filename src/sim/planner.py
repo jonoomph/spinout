@@ -35,6 +35,7 @@ class PlannerPreviewer:
         self.config = config or PlannerConfig()
         self.positions = np.zeros((0, 2), dtype=float)
         self.s = np.zeros(0, dtype=float)
+        self.tangents = np.zeros((0, 2), dtype=float)
         self.curvature = np.zeros(0, dtype=float)
         self.speed_limits: List[dict] = []
         self._last_projection: Tuple[float, float, float] | None = None
@@ -44,6 +45,7 @@ class PlannerPreviewer:
         if not drive_line:
             self.positions = np.zeros((0, 2), dtype=float)
             self.s = np.zeros(0, dtype=float)
+            self.tangents = np.zeros((0, 2), dtype=float)
             self.curvature = np.zeros(0, dtype=float)
             self.speed_limits = []
             self._last_projection = None
@@ -56,6 +58,7 @@ class PlannerPreviewer:
         diffs = np.diff(pts, axis=0)
         ds = np.linalg.norm(diffs, axis=1)
         self.s = np.concatenate(([0.0], np.cumsum(ds)))
+        self.tangents = self._compute_tangents(pts, self.s)
         self.curvature = self._compute_curvature(pts)
         self.speed_limits = list(speed_limits or [])
         self._last_projection = None
@@ -154,7 +157,7 @@ class PlannerPreviewer:
             separation = float(np.linalg.norm(pos - point_cand))
             if separation <= max(25.0, abs(lateral_error) + 5.0):
                 self._last_index = idx_cand
-                path_heading = float(math.atan2(tangent_cand[0], tangent_cand[1]))
+                path_heading = self._heading_at(s_candidate)
                 return s_candidate, lateral_error, path_heading
 
         segs = pts[1:] - pts[:-1]
@@ -199,11 +202,10 @@ class PlannerPreviewer:
 
         self._last_index = idx
         s_val = float(self.s[idx] + t_val * (self.s[idx + 1] - self.s[idx]))
-        tangent = segs[idx]
-        tangent_norm = tangent / (np.linalg.norm(tangent) + 1e-9)
+        tangent_norm = self._tangent_at(s_val)
         normal = np.array([-tangent_norm[1], tangent_norm[0]])
         lateral_error = float(np.dot(pos - proj_point, normal))
-        path_heading = float(math.atan2(tangent_norm[0], tangent_norm[1]))
+        path_heading = self._heading_at(s_val)
         return s_val, lateral_error, path_heading
 
     def _sample_path(self, s: float) -> tuple[np.ndarray, np.ndarray, int]:
@@ -225,7 +227,45 @@ class PlannerPreviewer:
         else:
             frac = float((s_clamped - seg_s0) / (seg_s1 - seg_s0))
         point = p0 + seg * frac
-        return point, tangent, seg_idx
+        return point, self._tangent_at(s_clamped), seg_idx
+
+    def _tangent_at(self, s: float) -> np.ndarray:
+        if self.positions.shape[0] < 2 or self.tangents.shape[0] == 0:
+            return np.array([1.0, 0.0], dtype=float)
+        s_clamped = float(np.clip(s, self.s[0], self.s[-1]))
+        idx = int(np.searchsorted(self.s, s_clamped, side="right"))
+        idx = max(1, min(idx, self.s.size - 1))
+        lo = idx - 1
+        hi = idx
+        s_lo = self.s[lo]
+        s_hi = self.s[hi]
+        if s_hi <= s_lo:
+            tangent = self.tangents[hi].copy()
+        else:
+            frac = float((s_clamped - s_lo) / (s_hi - s_lo))
+            tangent = (1.0 - frac) * self.tangents[lo] + frac * self.tangents[hi]
+        norm = np.linalg.norm(tangent)
+        if norm < 1e-9:
+            return self.tangents[hi].copy()
+        return tangent / norm
+
+    def _heading_at(self, s: float) -> float:
+        tangent = self._tangent_at(s)
+        return float(math.atan2(tangent[0], tangent[1]))
+
+    def _compute_tangents(self, pts: np.ndarray, s: np.ndarray) -> np.ndarray:
+        n = pts.shape[0]
+        tangents = np.zeros_like(pts)
+        if n < 2:
+            return tangents
+        tangents[0] = pts[1] - pts[0]
+        tangents[-1] = pts[-1] - pts[-2]
+        for i in range(1, n - 1):
+            ds = max(s[i + 1] - s[i - 1], 1e-9)
+            tangents[i] = (pts[i + 1] - pts[i - 1]) / ds
+        norms = np.linalg.norm(tangents, axis=1, keepdims=True)
+        tangents = tangents / np.maximum(norms, 1e-9)
+        return tangents
 
     def _compute_curvature(self, pts: np.ndarray) -> np.ndarray:
         n = pts.shape[0]

@@ -1,5 +1,7 @@
 import math
 import os
+import csv
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -18,6 +20,11 @@ from src.sim.planner import PlannerPreviewer
 from tests.helpers import configure_flat_drive_line, ensure_drive_line_layer
 
 VISUALIZE = bool(int(os.environ.get("VISUALIZE", "0")))
+PID_DEBUG_PLOTS = bool(int(os.environ.get("PID_DEBUG_PLOTS", "0")))
+PID_DEBUG_PLOT_LABEL = os.environ.get("PID_DEBUG_PLOT_LABEL", "").strip()
+PID_DEBUG_PLOT_DIR = os.environ.get("PID_DEBUG_PLOT_DIR", "").strip()
+S_CURVE_CONTROL_HZ = float(os.environ.get("S_CURVE_CONTROL_HZ", "100.0"))
+S_CURVE_PHYSICS_HZ = float(os.environ.get("S_CURVE_PHYSICS_HZ", "300.0"))
 MPS_TO_MPH = 2.2369362920544
 
 
@@ -508,7 +515,10 @@ def _run_s_curve_trial(
     print(f"\n\n=== S-curve trial: {label} ===")
 
     mode = "eval" if VISUALIZE else "train"
-    env = Environment({"flat": True, "dt": 0.02, "substeps": 1, "sun_time_hours": 12.0}, mode=mode)
+    env = Environment(
+        {"flat": True, "dt": 1.0 / S_CURVE_PHYSICS_HZ, "substeps": 1, "sun_time_hours": 12.0},
+        mode=mode,
+    )
     env.reset()
 
     assert env.terrain is not None
@@ -517,7 +527,8 @@ def _run_s_curve_trial(
     )
     print(
         f"  geometry: z_s_start={z_s_start:.0f} m, z_s_end={z_s_end:.0f} m, "
-        f"amplitude=5 m, direction={direction:+.0f}"
+        f"amplitude=5 m, direction={direction:+.0f}, "
+        f"control_hz={S_CURVE_CONTROL_HZ:.0f}, physics_hz={S_CURVE_PHYSICS_HZ:.0f}"
     )
 
     # Keep planner preview curvature consistent with the speed under test.
@@ -556,7 +567,10 @@ def _run_s_curve_trial(
     env._refresh_initial_telemetry()  # type: ignore[attr-defined]
 
     ctrl_cls = controller_class if controller_class is not None else PIDSteeringController
-    controller = ctrl_cls()
+    try:
+        controller = ctrl_cls(control_rate_hz=S_CURVE_CONTROL_HZ)
+    except TypeError:
+        controller = ctrl_cls()
     env.attach_controller(controller)
     controller.enable()
 
@@ -572,6 +586,58 @@ def _run_s_curve_trial(
     exit_stable_req = 5.0
     exit_tol = 0.5
     past_s_curve = False
+    drive_line_z = np.array([pt[1] for pt in drive_line], dtype=float)
+    drive_line_x = np.array([pt[0] for pt in drive_line], dtype=float)
+    trace: dict[str, list[float]] = {
+        "time_s": [],
+        "car_z_m": [],
+        "car_x_m": [],
+        "target_x_m": [],
+        "speed_mph": [],
+        "steer_cmd": [],
+        "steer_delta": [],
+        "controller_updated": [],
+        "throttle_cmd": [],
+        "brake_cmd": [],
+        "lateral_error_m": [],
+        "heading_error_rad": [],
+        "effective_error_m": [],
+        "effective_error_rate_mps": [],
+        "integral_error_s": [],
+        "p_term": [],
+        "i_term": [],
+        "d_term": [],
+        "pid_out": [],
+        "ff": [],
+        "target_lat_accel": [],
+        "preview_lat_accel": [],
+        "current_lat_accel": [],
+        "target_curvature": [],
+        "preview_curvature": [],
+        "current_curvature": [],
+    }
+
+    def finalize(ok: bool, message: str) -> tuple[bool, str]:
+        if PID_DEBUG_PLOTS and (
+            not PID_DEBUG_PLOT_LABEL
+            or PID_DEBUG_PLOT_LABEL in label
+            or PID_DEBUG_PLOT_LABEL in _current_test_name()
+        ):
+            _plot_s_curve_debug_trace(
+                test_name=_current_test_name(),
+                trial_label=label,
+                trace=trace,
+                z_s_start=z_s_start,
+                z_s_end=z_s_end,
+            )
+        if PID_DEBUG_PLOT_DIR:
+            _write_s_curve_debug_csv(
+                test_name=_current_test_name(),
+                trial_label=label,
+                trace=trace,
+            )
+        env.attach_controller(None)
+        return ok, message
 
     for step_idx in range(steps):
         assert env.car is not None
@@ -603,8 +669,7 @@ def _run_s_curve_trial(
 
         _, _, terminated, truncated, info = env.step(DriverCommand(throttle=throttle_cmd, brake=brake_cmd))
         if terminated:
-            env.attach_controller(None)
-            return (
+            return finalize(
                 False,
                 f"{label}: car left terrain at z={car_z:.0f} m",
             )
@@ -612,12 +677,41 @@ def _run_s_curve_trial(
 
         tele = env._build_snapshot(env._prev_velocity)  # type: ignore[attr-defined]
         lat_error = tele.target.lateral_error
+        v_ego = max(float(tele.state.v_ego), 1e-6)
+        target_x = float(np.interp(car_z, drive_line_z, drive_line_x))
+        steer_cmd = float(info["driver_command"]["steer"])
+        prev_steer_cmd = trace["steer_cmd"][-1] if trace["steer_cmd"] else 0.0
+        trace["time_s"].append(step_idx * env.dt)
+        trace["car_z_m"].append(car_z)
+        trace["car_x_m"].append(car_x)
+        trace["target_x_m"].append(target_x)
+        trace["speed_mph"].append(speed_mph)
+        trace["steer_cmd"].append(steer_cmd)
+        trace["steer_delta"].append(steer_cmd - prev_steer_cmd)
+        trace["controller_updated"].append(float(abs(steer_cmd - prev_steer_cmd) > 1e-9))
+        trace["throttle_cmd"].append(throttle_cmd)
+        trace["brake_cmd"].append(brake_cmd)
+        trace["lateral_error_m"].append(float(tele.target.lateral_error))
+        trace["heading_error_rad"].append(float(tele.target.heading_error))
+        trace["effective_error_m"].append(float(controller._last_pid_error))  # type: ignore[attr-defined]
+        trace["effective_error_rate_mps"].append(float(controller._last_de_dt))  # type: ignore[attr-defined]
+        trace["integral_error_s"].append(float(controller._last_integral_state))  # type: ignore[attr-defined]
+        trace["p_term"].append(float(controller._last_p_term))  # type: ignore[attr-defined]
+        trace["i_term"].append(float(controller._last_i_term))  # type: ignore[attr-defined]
+        trace["d_term"].append(float(controller._last_d_term))  # type: ignore[attr-defined]
+        trace["pid_out"].append(float(controller._last_pid_out))  # type: ignore[attr-defined]
+        trace["ff"].append(float(controller._last_ff))  # type: ignore[attr-defined]
+        trace["target_lat_accel"].append(float(tele.target.lat_accel))
+        trace["preview_lat_accel"].append(float(controller._last_base_target_lat))  # type: ignore[attr-defined]
+        trace["current_lat_accel"].append(float(tele.state.lat_accel))
+        trace["target_curvature"].append(float(tele.target.lat_accel / max(v_ego * v_ego, 1e-6)))
+        trace["preview_curvature"].append(float(controller._last_base_target_lat / max(v_ego * v_ego, 1e-6)))  # type: ignore[attr-defined]
+        trace["current_curvature"].append(float(tele.state.lat_accel / max(v_ego * v_ego, 1e-6)))
 
         if z_s_start <= car_z <= z_s_end:
             s_max_error = max(s_max_error, abs(lat_error))
             if s_max_error > max_s_error_m:
-                env.attach_controller(None)
-                return (
+                return finalize(
                     False,
                     f"{label}: s_max_error exceeded {max_s_error_m:.1f}m ({s_max_error:.2f}m) at z={car_z:.0f}",
                 )
@@ -627,8 +721,7 @@ def _run_s_curve_trial(
             if abs(lat_error) <= exit_tol:
                 exit_stable_time += env.dt
                 if exit_stable_time >= exit_stable_req:
-                    env.attach_controller(None)
-                    return (
+                    return finalize(
                         True,
                         f"{label}: s_max_error={s_max_error:.2f} m, "
                         f"settled ±{exit_tol} m on exit straight",
@@ -636,18 +729,136 @@ def _run_s_curve_trial(
             else:
                 exit_stable_time = 0.0
 
-    env.attach_controller(None)
     if not past_s_curve:
-        return (
+        return finalize(
             False,
             f"{label}: car never reached S-curve end (z_s_end={z_s_end:.0f} m)",
         )
-    return (
+    return finalize(
         False,
         f"{label}: s_max_error={s_max_error:.2f} m, "
         f"did not settle ±{exit_tol} m for {exit_stable_req} s "
         f"(exit_stable_time={exit_stable_time:.1f} s)",
     )
+
+
+def _current_test_name() -> str:
+    current = os.environ.get("PYTEST_CURRENT_TEST", "").strip()
+    if not current:
+        return "pytest"
+    return current.split(" ", 1)[0]
+
+
+def _plot_s_curve_debug_trace(
+    *,
+    test_name: str,
+    trial_label: str,
+    trace: dict[str, list[float]],
+    z_s_start: float,
+    z_s_end: float,
+) -> None:
+    if not trace["time_s"]:
+        return
+
+    import matplotlib.pyplot as plt
+
+    time_s = np.array(trace["time_s"], dtype=float)
+    car_z_m = np.array(trace["car_z_m"], dtype=float)
+    in_s_curve = (car_z_m >= z_s_start) & (car_z_m <= z_s_end)
+
+    fig, axes = plt.subplots(2, 2, figsize=(16, 10), sharex=True)
+    fig.suptitle(f"{test_name}\nS-curve debug trace: {trial_label}")
+
+    ax = axes[0, 0]
+    ax.plot(time_s, trace["steer_cmd"], label="steer_cmd", linewidth=2.0, color="black")
+    ax.plot(time_s, trace["ff"], label="feedforward", linewidth=1.5)
+    ax.plot(time_s, trace["p_term"], label="P", linewidth=1.2)
+    ax.plot(time_s, trace["i_term"], label="I", linewidth=1.2)
+    ax.plot(time_s, trace["d_term"], label="D", linewidth=1.2)
+    ax.plot(time_s, trace["pid_out"], label="PID sum", linewidth=1.2, linestyle="--")
+    ax.set_ylabel("Steer command")
+    ax.set_title("Controller Terms")
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="best")
+
+    ax = axes[0, 1]
+    ax.plot(time_s, trace["car_x_m"], label="current x", linewidth=2.0)
+    ax.plot(time_s, trace["target_x_m"], label="target x", linewidth=2.0, linestyle="--")
+    ax.plot(time_s, trace["lateral_error_m"], label="lateral error", linewidth=1.2)
+    ax.plot(time_s, trace["effective_error_m"], label="effective error", linewidth=1.2)
+    ax.plot(time_s, trace["heading_error_rad"], label="heading error (rad)", linewidth=1.2)
+    ax.set_ylabel("Metres / radians")
+    ax.set_title("Current vs Target")
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="best")
+
+    ax = axes[1, 0]
+    ax.plot(time_s, trace["current_lat_accel"], label="current lat accel", linewidth=1.8)
+    ax.plot(time_s, trace["target_lat_accel"], label="target lat accel", linewidth=1.4, linestyle="--")
+    ax.plot(time_s, trace["preview_lat_accel"], label="preview lat accel", linewidth=1.4)
+    ax.plot(time_s, trace["current_curvature"], label="current curvature", linewidth=1.0)
+    ax.plot(time_s, trace["target_curvature"], label="target curvature", linewidth=1.0, linestyle="--")
+    ax.plot(time_s, trace["preview_curvature"], label="preview curvature", linewidth=1.0)
+    ax.set_ylabel("m/s^2 and 1/m")
+    ax.set_title("Curvature And Lateral Acceleration")
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="best")
+
+    ax = axes[1, 1]
+    ax.plot(time_s, trace["speed_mph"], label="speed mph", linewidth=2.0)
+    ax.plot(time_s, trace["throttle_cmd"], label="throttle", linewidth=1.2)
+    ax.plot(time_s, trace["brake_cmd"], label="brake", linewidth=1.2)
+    ax.plot(time_s, trace["car_z_m"], label="z position", linewidth=1.2)
+    ax.set_ylabel("Mixed units")
+    ax.set_title("Longitudinal Context")
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="best")
+
+    for ax in axes.flat:
+        ax.set_xlabel("Time (s)")
+        if np.any(in_s_curve):
+            ax.axvspan(time_s[in_s_curve][0], time_s[in_s_curve][-1], color="orange", alpha=0.10)
+
+    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.97))
+    if PID_DEBUG_PLOT_DIR:
+        out_dir = Path(PID_DEBUG_PLOT_DIR)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        slug = _plot_slug(f"{test_name}_{trial_label}")
+        fig.savefig(out_dir / f"{slug}.png", dpi=160, bbox_inches="tight")
+    plt.show()
+
+
+def _plot_slug(value: str) -> str:
+    chars = []
+    for ch in value.lower():
+        if ch.isalnum():
+            chars.append(ch)
+        elif ch in {" ", "-", "_", "/", ":", "[", "]", "(", ")"}:
+            chars.append("_")
+    slug = "".join(chars).strip("_")
+    while "__" in slug:
+        slug = slug.replace("__", "_")
+    return slug or "plot"
+
+
+def _write_s_curve_debug_csv(
+    *,
+    test_name: str,
+    trial_label: str,
+    trace: dict[str, list[float]],
+) -> None:
+    out_dir = Path(PID_DEBUG_PLOT_DIR)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    slug = _plot_slug(f"{test_name}_{trial_label}")
+    out_path = out_dir / f"{slug}.csv"
+    fieldnames = list(trace.keys())
+    row_count = len(trace[fieldnames[0]]) if fieldnames else 0
+
+    with out_path.open("w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for idx in range(row_count):
+            writer.writerow({name: trace[name][idx] for name in fieldnames})
 
 
 def test_pid_follows_s_curve():

@@ -145,6 +145,8 @@ class Environment:
         self._last_driver_command = DriverCommand()
         self._controller_hud = ("No Controller", "Manual Steer")
         self._controller_enabled_last_step = False
+        self.render_fps = float(self.cfg.get("render_fps", 60.0))
+        self._render_accum = 0.0
 
         # Rendering state ------------------------------------------------------
         self.render_mode = 1
@@ -1031,7 +1033,7 @@ class Environment:
 
         speed_mph = np.linalg.norm(self.car.body.vel) * 2.23694
         fps_r = self.clock.get_fps()
-        fps_p = fps_r * self.substeps
+        fps_p = 1.0 / max(self.dt / max(self.substeps, 1), 1e-9)
         steer_angle = next(w.steer_angle for w in self.car.wheels if w.is_front)
         wind_speed = 0.0
         wind_dir = 0.0
@@ -1101,6 +1103,7 @@ class Environment:
         self._refresh_initial_telemetry()
         self._controller_timer = 0.0
         self._controller_last_command = None
+        self._render_accum = 0.0
         if self._controller is not None:
             self._update_controller_period()
             self._controller.reset()
@@ -1300,6 +1303,12 @@ class Environment:
 
         reward = -step_cost
         if self.mode == "eval" and getattr(self, "render_ctx", None):
-            self._render(self.dt)
-            self.clock.tick(60)
+            render_period = 0.0 if self.render_fps <= 0.0 else 1.0 / self.render_fps
+            self._render_accum += self.dt
+            if render_period <= 0.0 or self._render_accum >= render_period - 1e-9:
+                render_dt = self._render_accum if render_period > 0.0 else self.dt
+                self._render(render_dt)
+                self._render_accum = 0.0
+                if self.render_fps > 0.0:
+                    self.clock.tick(int(round(self.render_fps)))
         return obs, reward, terminated, truncated, info
