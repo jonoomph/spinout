@@ -38,7 +38,10 @@ def test_preview_uses_default_frequency():
     expected_lat = (30 * 0.44704) ** 2 / 50.0
     assert preview.lat_accel[0] == pytest.approx(expected_lat, rel=1e-3)
 
-    heading = math.atan2(drive_line[1][1] - drive_line[0][1], drive_line[1][0] - drive_line[0][0])
+    heading = math.atan2(
+        drive_line[1][0] - drive_line[0][0],
+        drive_line[1][1] - drive_line[0][1],
+    )
     target = previewer.immediate_target(position, speed=0.0, heading=heading, preview=preview)
     assert target.speed == preview.speed[0]
     assert target.lat_accel == preview.lat_accel[0]

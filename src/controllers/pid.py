@@ -1,9 +1,8 @@
-"""Simple PID-based controller that outputs steering, throttle and brake."""
+"""Position-domain PID steering controller with curvature feedforward."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-import math
 from typing import Optional
 
 import numpy as np
@@ -11,39 +10,45 @@ import numpy as np
 from .controller import BaseController
 from src.sim.control_api import DriverCommand, TelemetrySnapshot
 
+# Feedforward preview window: 0.5 s at <=20 mph, scaling to 0.9 s at 60 mph.
+_PREVIEW_SECS_LO: float = 0.5
+_PREVIEW_SECS_HI: float = 0.9
+_PREVIEW_V_LO: float = 20.0 * 0.44704
+_PREVIEW_V_HI: float = 60.0 * 0.44704
+# Heading anticipation horizon used when forming the feedback error.
+_HEADING_PREVIEW_SECS = 0.3
+
 
 @dataclass
 class PIDGains:
-    """Bundle of PID gains with a small helper docstring.
+    """Gains for position-error feedback plus curvature feedforward.
 
-    Examples
-    --------
-    >>> gains = PIDGains(kp=0.3, ki=0.07, kd=-0.1)
-    >>> gains.kp
-    0.3
+    steer = ff + p + i + d
+
+    All gains are expressed in steer-command units (-1..+1).
+      kp: steer per metre of effective lateral error
+      ki: steer per metre-second of accumulated error
+      kd: steer per metre/second of error rate
+      k_ff: steer per m/s^2 of planned lateral acceleration
     """
-
-    kp: float = 0.3
-    ki: float = 0.07
-    kd: float = -0.01  # CC uses d*(e-prev_e) with no /dt; our code divides by dt=0.1, so kd=-0.01 ≡ CC d=-0.1
-    integral_limit: float = 0.5
+    kp: float = 0.55
+    ki: float = 0.005
+    kd: float = 0.35
+    k_ff: float = 0.08
+    integral_limit: float = 0.25
 
 
 class PIDSteeringController(BaseController):
-    """PID controller inspired by the Comma.ai controls challenge.
+    """Position-domain PID controller with curvature feedforward.
 
-    Tracks lateral acceleration rather than lateral position directly.
-    The planner's road-curvature target is augmented with position and
-    velocity correction terms to produce a desired lateral acceleration.
-    A PID then closes the loop on (target_lat_accel - current_lat_accel),
-    with a large feedforward carrying the majority of the curvature demand.
+    Feedback steers the car back to the path using lateral/heading error.
+    Feedforward adds the steering needed for the planned road curvature so the
+    controller does not have to wait for tracking error before turning.
 
-    Sign conventions (left-positive, matching the road planner):
-      - positive steer      → left turn
-      - positive lat_accel  → accelerating left
-      - positive lat_velocity → moving left
-      - lateral_error > 0   → car is to the LEFT of the path
-      - heading_error > 0   → car is heading LEFT relative to path tangent
+    Sign conventions (left-positive):
+      lateral_error > 0 → car is left of path → needs right steer (negative)
+      positive lat_accel → accelerating left
+      positive feedforward → road curves left → needs left steer (positive)
     """
 
     def __init__(
@@ -56,166 +61,85 @@ class PIDSteeringController(BaseController):
         self.gains = gains or PIDGains()
         self.steer_limit = steer_limit
 
-        # Feedforward scaling (sigmoid linearisation around small steer angles)
-        self.steer_factor = 9.0
-        self.steer_sat_v = 20.0
-        self.steer_command_sat = 2.0
+        self._integral: float = 0.0
+        self._prev_eff_err: Optional[float] = None
 
-        # Cross-track and lateral-velocity correction gains (simple linear, no tanh)
-        self.kp_lat = 1.0   # m/s² per m of lateral error
-        self.kd_lat = 1.5   # m/s² per m/s of lateral closing rate
-        # Short heading anticipation (pure-pursuit style, 0.2s lookahead).
-        # This prevents heading-induced overshoot on straight roads without causing
-        # the premature reversal at S-curve peaks that the original 1.0s preview had.
-        self.preview_secs = 0.3
-
-        # Feedforward weight (fraction of full sigmoid steer command)
-        self.K_ff = 0.7
-
-        self.max_target_lat = 4.0
-
-        self._integral = 0.0
-        self._prev_error: Optional[float] = None
-        self._prev_lateral_error: Optional[float] = None
-        self._step_counter = 0
+        # Diagnostics kept for logging and tests.
         self._last_target_lat: float = 0.0
-
-        # Diagnostic terms written each step (readable externally for logging/plotting).
+        self._last_base_target_lat: float = 0.0
+        self._last_lateral_term: float = 0.0
+        self._last_pid_error: float = 0.0
         self._last_p_term: float = 0.0
         self._last_i_term: float = 0.0
         self._last_d_term: float = 0.0
         self._last_pid_out: float = 0.0
         self._last_ff: float = 0.0
-        self._last_pid_error: float = 0.0
-        self._last_base_target_lat: float = 0.0
-        self._last_lateral_term: float = 0.0
 
     def reset(self) -> None:  # type: ignore[override]
         self._integral = 0.0
-        self._prev_error = None
-        self._prev_lateral_error = None
-        self._step_counter = 0
-        self._last_target_lat = 0.0
-        self._last_p_term = 0.0
-        self._last_i_term = 0.0
-        self._last_d_term = 0.0
-        self._last_pid_out = 0.0
-        self._last_ff = 0.0
-        self._last_pid_error = 0.0
-        self._last_base_target_lat = 0.0
-        self._last_lateral_term = 0.0
+        self._prev_eff_err = None
+        self._last_target_lat = self._last_base_target_lat = 0.0
+        self._last_lateral_term = self._last_pid_error = 0.0
+        self._last_p_term = self._last_i_term = self._last_d_term = 0.0
+        self._last_pid_out = self._last_ff = 0.0
 
     def on_disable(self) -> None:  # type: ignore[override]
         self.reset()
 
-    # ------------------------------------------------------------------
+    def _preview_seconds(self, v_ego: float) -> float:
+        speed = min(max(v_ego, _PREVIEW_V_LO), _PREVIEW_V_HI)
+        frac = (speed - _PREVIEW_V_LO) / (_PREVIEW_V_HI - _PREVIEW_V_LO)
+        return _PREVIEW_SECS_LO + frac * (_PREVIEW_SECS_HI - _PREVIEW_SECS_LO)
 
-    def _clip(self, value: float, limit: float) -> float:
-        return max(-limit, min(limit, value))
+    def _feedforward_lat_accel(self, telemetry: TelemetrySnapshot) -> float:
+        fut = telemetry.future.lat_accel or ()
+        if not fut:
+            return telemetry.target.lat_accel
 
-    def _compute_pid(self, error: float, dt: float) -> float:
-        derivative = 0.0 if self._prev_error is None else (error - self._prev_error) / dt
-        self._integral += error * dt
-        self._integral = self._clip(self._integral, self.gains.integral_limit)
-        output = (
-            self.gains.kp * error
-            + self.gains.ki * self._integral
-            + self.gains.kd * derivative
+        preview_secs = self._preview_seconds(telemetry.state.v_ego)
+        preview_hz = self.preview_rate_hz or 10.0
+        n = min(len(fut), max(1, round(preview_secs * preview_hz)))
+        return float(np.mean(fut[:n]))
+
+    def _effective_lateral_error(self, telemetry: TelemetrySnapshot) -> float:
+        return (
+            telemetry.target.lateral_error
+            + telemetry.target.heading_error * telemetry.state.v_ego * _HEADING_PREVIEW_SECS
         )
-        self._prev_error = error
-        return output
 
-    def step(  # type: ignore[override]
-        self, telemetry: TelemetrySnapshot, manual: DriverCommand
-    ) -> DriverCommand:
+    def step(self, telemetry: TelemetrySnapshot, manual: DriverCommand) -> DriverCommand:
         if not self.enabled:
             return manual
 
-        dt = self.dt or 0.1
-        self._step_counter += 1
-        if self._step_counter >= int(8.1 / max(dt, 1e-6)):
-            self._integral = 0.0
-            self._prev_error = None
-            self._step_counter = 0
+        dt = max(self.dt or 0.1, 1e-6)
 
-        state = telemetry.state
+        base = self._feedforward_lat_accel(telemetry)
+        ff = self.gains.k_ff * base
 
-        # --- 1. Base target: weighted average of near-future curvature ---
-        # Weights favour points closer to the car to avoid over-anticipating
-        # the far end of a curve before the car arrives.
-        if telemetry.future.lat_accel and len(telemetry.future.lat_accel) >= 1:
-            n_use = min(4, len(telemetry.future.lat_accel))
-            weights = [5, 6, 7, 8][:n_use]
-            base_target_lat = float(np.average(
-                telemetry.future.lat_accel[:n_use], weights=weights
-            ))
-        else:
-            base_target_lat = telemetry.target.lat_accel
-        self._last_base_target_lat = base_target_lat
+        e = self._effective_lateral_error(telemetry)
 
-        dt_safe = max(dt, 1e-6)
+        de_dt = 0.0 if self._prev_eff_err is None else (e - self._prev_eff_err) / dt
+        self._prev_eff_err = e
 
-        # --- 2. Simple cross-track correction (no tanh, short heading anticipation) ---
-        # Project lateral error forward by preview_secs to anticipate heading-induced
-        # drift.  Kept short (0.2s vs original 1.0s) to avoid premature reversal at
-        # S-curve inflection points while still preventing overshoot on straights.
-        heading_error = telemetry.target.heading_error
-        lateral_error = telemetry.target.lateral_error
-        lateral_error_preview = (
-            lateral_error + heading_error * state.v_ego * self.preview_secs
-        )
-        lateral_term = -self.kp_lat * lateral_error_preview
-
-        # World-frame lateral closing rate: d(lateral_error)/dt.
-        # More accurate than car-frame lat_velocity when heading error is large,
-        # because the car-frame velocity underestimates the world-frame closing rate
-        # when the car is angled across the path.
-        if self._prev_lateral_error is not None:
-            lateral_error_dot = (lateral_error - self._prev_lateral_error) / dt_safe
-        else:
-            lateral_error_dot = 0.0
-        self._prev_lateral_error = lateral_error
-        lat_velocity_term = -self.kd_lat * lateral_error_dot
-        self._last_lateral_term = lateral_term
-
-        target_lat = base_target_lat + lateral_term + lat_velocity_term
-        target_lat = self._clip(target_lat, self.max_target_lat)
-        self._last_target_lat = target_lat
-
-        # --- 3. PID on (target - actual) lateral acceleration ---
-        error = target_lat - state.lat_accel
-
-        # Pre-compute derivative before _compute_pid updates _prev_error.
-        pre_derivative = (
-            0.0 if self._prev_error is None
-            else (error - self._prev_error) / dt_safe
+        self._integral = max(
+            -self.gains.integral_limit,
+            min(self.gains.integral_limit, self._integral + e * dt),
         )
 
-        pid_out = self._compute_pid(error, dt_safe)
+        p_term = -self.gains.kp * e
+        i_term = -self.gains.ki * self._integral
+        d_term = -self.gains.kd * de_dt
+        correction = p_term + i_term + d_term
+        steer = max(-self.steer_limit, min(self.steer_limit, ff + correction))
 
-        self._last_pid_error = error
-        self._last_p_term = self.gains.kp * error
-        self._last_i_term = self.gains.ki * self._integral
-        self._last_d_term = self.gains.kd * pre_derivative
-        self._last_pid_out = pid_out
-
-        # --- 4. Feedforward based on road curvature ONLY (not lateral correction) ---
-        # Using base_target_lat (road curvature) keeps position-correction terms out of
-        # the ff path.  If target_lat were used, a 3 m lateral offset would be amplified
-        # ~3× by ff, causing severe overshoot on straight-road centering.
-        speed = max(state.v_ego, 1.0)
-        steer_cmd = base_target_lat * self.steer_factor / max(self.steer_sat_v, speed)
-        steer_cmd = 2 * self.steer_command_sat / (1 + math.exp(-steer_cmd)) - self.steer_command_sat
-
-        ff = self.K_ff * steer_cmd
+        self._last_base_target_lat = base
+        self._last_target_lat = base
+        self._last_pid_error = e
+        self._last_p_term = p_term
+        self._last_i_term = i_term
+        self._last_d_term = d_term
+        self._last_pid_out = correction
         self._last_ff = ff
+        self._last_lateral_term = correction
 
-        # --- 5. Output ---
-        steer = self._clip(pid_out + ff, self.steer_command_sat)
-        steer = self._clip(steer / self.steer_command_sat, self.steer_limit)
-
-        return DriverCommand(
-            steer=steer,
-            throttle=manual.throttle,
-            brake=manual.brake,
-        )
+        return DriverCommand(steer=steer, throttle=manual.throttle, brake=manual.brake)

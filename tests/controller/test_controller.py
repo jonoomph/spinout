@@ -1,13 +1,11 @@
-import csv
 import math
 import os
-from pathlib import Path
 
 import numpy as np
 import pytest
 
 from src.controllers.controller import BaseController
-from src.controllers.pid import PIDSteeringController
+from src.controllers.pid import PIDGains, PIDSteeringController
 from src.sim.control_api import (
     DriverCommand,
     FuturePreview,
@@ -19,9 +17,8 @@ from src.sim.environment import Environment
 from src.sim.planner import PlannerPreviewer
 from tests.helpers import configure_flat_drive_line, ensure_drive_line_layer
 
-VISUALIZE = bool(int(os.environ.get("VISUALIZE", "1")))
+VISUALIZE = bool(int(os.environ.get("VISUALIZE", "0")))
 MPS_TO_MPH = 2.2369362920544
-_TRIAL_LOG_DIR = Path("/tmp/pid_trials")
 
 
 class CountingController(BaseController):
@@ -32,6 +29,32 @@ class CountingController(BaseController):
     def step(self, telemetry, manual):  # type: ignore[override]
         self.calls += 1
         return DriverCommand(steer=0.1, throttle=manual.throttle, brake=manual.brake)
+
+
+def _snapshot(
+    *,
+    v_ego: float = 15.0,
+    lateral_error: float = 0.0,
+    heading_error: float = 0.0,
+    target_lat_accel: float = 0.0,
+    future_lat_accel: tuple[float, ...] = (),
+) -> TelemetrySnapshot:
+    dt = 0.1
+    return TelemetrySnapshot(
+        state=VehicleState(v_ego=v_ego, lat_velocity=0.0, lat_accel=0.0),
+        target=PlannerTarget(
+            lat_accel=target_lat_accel,
+            lateral_error=lateral_error,
+            heading_error=heading_error,
+        ),
+        future=FuturePreview(
+            lat_accel=future_lat_accel,
+            roll_lataccel=tuple(0.0 for _ in future_lat_accel),
+            speed=tuple(v_ego for _ in future_lat_accel),
+            long_accel=tuple(0.0 for _ in future_lat_accel),
+            dt=dt,
+        ) if future_lat_accel else FuturePreview.empty(dt),
+    )
 
 
 def test_controller_runs_at_declared_frequency():
@@ -83,6 +106,73 @@ def test_pid_tracks_future_lat_accel_heading():
     controller.enable()
     command = controller.step(snapshot, DriverCommand())
     assert command.steer > 0.0
+
+
+def test_pid_p_term_isolated():
+    controller = PIDSteeringController(
+        gains=PIDGains(kp=0.2, ki=0.0, kd=0.0, k_ff=0.0),
+    )
+    controller.enable()
+
+    command = controller.step(_snapshot(lateral_error=1.5), DriverCommand())
+
+    assert command.steer == pytest.approx(-0.3)
+    assert controller._last_p_term == pytest.approx(-0.3)  # type: ignore[attr-defined]
+    assert controller._last_i_term == pytest.approx(0.0)   # type: ignore[attr-defined]
+    assert controller._last_d_term == pytest.approx(0.0)   # type: ignore[attr-defined]
+    assert controller._last_ff == pytest.approx(0.0)       # type: ignore[attr-defined]
+
+
+def test_pid_i_term_accumulates_isolated():
+    controller = PIDSteeringController(
+        gains=PIDGains(kp=0.0, ki=1.0, kd=0.0, k_ff=0.0, integral_limit=10.0),
+    )
+    controller.enable()
+
+    snapshot = _snapshot(lateral_error=0.5)
+    first = controller.step(snapshot, DriverCommand())
+    second = controller.step(snapshot, DriverCommand())
+
+    assert first.steer == pytest.approx(-0.05)
+    assert second.steer == pytest.approx(-0.10)
+    assert controller._last_p_term == pytest.approx(0.0)    # type: ignore[attr-defined]
+    assert controller._last_i_term == pytest.approx(-0.10)  # type: ignore[attr-defined]
+    assert controller._last_d_term == pytest.approx(0.0)    # type: ignore[attr-defined]
+    assert controller._last_ff == pytest.approx(0.0)        # type: ignore[attr-defined]
+
+
+def test_pid_d_term_responds_to_error_rate_isolated():
+    controller = PIDSteeringController(
+        gains=PIDGains(kp=0.0, ki=0.0, kd=0.05, k_ff=0.0),
+    )
+    controller.enable()
+
+    controller.step(_snapshot(lateral_error=0.0), DriverCommand())
+    command = controller.step(_snapshot(lateral_error=1.0), DriverCommand())
+
+    assert command.steer == pytest.approx(-0.5)
+    assert controller._last_p_term == pytest.approx(0.0)    # type: ignore[attr-defined]
+    assert controller._last_i_term == pytest.approx(0.0)    # type: ignore[attr-defined]
+    assert controller._last_d_term == pytest.approx(-0.5)   # type: ignore[attr-defined]
+    assert controller._last_ff == pytest.approx(0.0)        # type: ignore[attr-defined]
+
+
+def test_pid_feedforward_uses_future_curvature_isolated():
+    controller = PIDSteeringController(
+        gains=PIDGains(kp=0.0, ki=0.0, kd=0.0, k_ff=0.2),
+    )
+    controller.enable()
+
+    command = controller.step(
+        _snapshot(v_ego=20.0, future_lat_accel=(2.0, 2.0, 2.0, 2.0)),
+        DriverCommand(),
+    )
+
+    assert command.steer == pytest.approx(0.4)
+    assert controller._last_p_term == pytest.approx(0.0)    # type: ignore[attr-defined]
+    assert controller._last_i_term == pytest.approx(0.0)    # type: ignore[attr-defined]
+    assert controller._last_d_term == pytest.approx(0.0)    # type: ignore[attr-defined]
+    assert controller._last_ff == pytest.approx(0.4)        # type: ignore[attr-defined]
 
 
 def test_environment_reports_centripetal_lat_accel():
@@ -198,111 +288,6 @@ def test_planner_preview_remains_stable_across_state_changes():
     )
 
 
-def _plot_trial_csv(csv_path: Path) -> Path:
-    """Render a 3-panel diagnostic plot from a trial CSV and return the PNG path."""
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    times, lat_errs, steers, lat_accels, target_lats, heading_errs, lat_vels = (
-        [], [], [], [], [], [], []
-    )
-    with open(csv_path) as f:
-        for row in csv.DictReader(f):
-            times.append(float(row["t"]))
-            lat_errs.append(float(row["lateral_error_m"]))
-            steers.append(float(row["steer"]))
-            lat_accels.append(float(row["lat_accel"]))
-            target_lats.append(float(row["target_lat"]))
-            heading_errs.append(float(row["heading_error"]))
-            lat_vels.append(float(row["lat_velocity"]))
-
-    fig, axes = plt.subplots(3, 1, figsize=(14, 10), sharex=True)
-    fig.suptitle(csv_path.stem.replace("_", " "), fontsize=13)
-
-    axes[0].axhline(0, color="k", linewidth=0.5)
-    axes[0].axhline(0.3, color="gray", linewidth=0.8, linestyle="--", label="±0.3 m band")
-    axes[0].axhline(-0.3, color="gray", linewidth=0.8, linestyle="--")
-    axes[0].plot(times, lat_errs, color="steelblue", label="lateral error (m)")
-    axes[0].set_ylabel("lateral error (m)")
-    axes[0].legend(loc="upper right")
-
-    axes[1].axhline(0, color="k", linewidth=0.5)
-    axes[1].plot(times, steers, color="darkorange", label="steer cmd")
-    axes[1].plot(times, target_lats, color="purple", linestyle="--", label="target lat accel (m/s²)")
-    axes[1].set_ylabel("steer / target lat")
-    axes[1].legend(loc="upper right")
-
-    axes[2].axhline(0, color="k", linewidth=0.5)
-    axes[2].plot(times, lat_accels, color="royalblue", label="lat accel (m/s²)")
-    axes[2].plot(times, heading_errs, color="crimson", linestyle="--", label="heading error (rad)")
-    axes[2].plot(times, lat_vels, color="seagreen", linestyle=":", label="lat velocity (m/s)")
-    axes[2].set_ylabel("dynamics")
-    axes[2].set_xlabel("time (s)")
-    axes[2].legend(loc="upper right")
-
-    fig.tight_layout()
-    png_path = csv_path.with_suffix(".png")
-    fig.savefig(png_path, dpi=120, bbox_inches="tight")
-    plt.close(fig)
-    return png_path
-
-
-def _plot_pid_csv(csv_path: Path) -> Path:
-    """Render a 2-panel PID breakdown plot alongside the main trial plot."""
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    times, pid_errors = [], []
-    p_terms, i_terms, d_terms, pid_outs, ffs = [], [], [], [], []
-    target_lats, lat_accels = [], []
-
-    with open(csv_path) as f:
-        for row in csv.DictReader(f):
-            times.append(float(row["t"]))
-            pid_errors.append(float(row["pid_error"]))
-            p_terms.append(float(row["p_term"]))
-            i_terms.append(float(row["i_term"]))
-            d_terms.append(float(row["d_term"]))
-            pid_outs.append(float(row["pid_out"]))
-            ffs.append(float(row["ff"]))
-            target_lats.append(float(row["target_lat"]))
-            lat_accels.append(float(row["lat_accel"]))
-
-    fig, axes = plt.subplots(2, 1, figsize=(14, 8), sharex=True)
-    fig.suptitle(f"{csv_path.stem.replace('_', ' ')} — PID breakdown", fontsize=13)
-
-    # Panel 1: P, I, D contributions + total pid_out + feedforward
-    ax = axes[0]
-    ax.axhline(0, color="k", linewidth=0.5)
-    ax.plot(times, p_terms,   color="royalblue",  linewidth=1.5, label="P term")
-    ax.plot(times, i_terms,   color="darkorange",  linewidth=1.5, label="I term")
-    ax.plot(times, d_terms,   color="seagreen",    linewidth=1.5, label="D term")
-    ax.plot(times, pid_outs,  color="purple",      linewidth=1.5, linestyle="--", label="pid_out (P+I+D)")
-    ax.plot(times, ffs,       color="crimson",     linewidth=1.5, linestyle=":",  label="feedforward")
-    ax.set_ylabel("contribution to steer (pre-norm)")
-    ax.legend(loc="upper right", fontsize=9)
-    ax.grid(True, alpha=0.3)
-
-    # Panel 2: target_lat vs actual lat_accel, and the error between them
-    ax = axes[1]
-    ax.axhline(0, color="k", linewidth=0.5)
-    ax.plot(times, target_lats, color="crimson",   linewidth=1.5, linestyle="--", label="target lat_accel (m/s²)")
-    ax.plot(times, lat_accels,  color="royalblue", linewidth=1.5, label="actual lat_accel (m/s²)")
-    ax.plot(times, pid_errors,  color="gray",      linewidth=1.0, linestyle=":",  label="PID error (target − actual)")
-    ax.set_ylabel("lat accel (m/s²)")
-    ax.set_xlabel("time (s)")
-    ax.legend(loc="upper right", fontsize=9)
-    ax.grid(True, alpha=0.3)
-
-    fig.tight_layout()
-    png_path = csv_path.with_stem(csv_path.stem + "_pid").with_suffix(".png")
-    fig.savefig(png_path, dpi=120, bbox_inches="tight")
-    plt.close(fig)
-    return png_path
-
-
 def _place_car_with_lateral_offset(env: Environment, center_x: float, offset_m: float) -> None:
     """Drop the car at the requested lateral offset relative to the driveline."""
 
@@ -318,7 +303,7 @@ def _place_car_with_lateral_offset(env: Environment, center_x: float, offset_m: 
     env._refresh_initial_telemetry()  # type: ignore[attr-defined]
 
 
-def _run_pid_centering_trial(offset_m: float, target_speed_mph: float = 25.0) -> tuple[bool, str, Path]:
+def _run_pid_centering_trial(offset_m: float, target_speed_mph: float = 25.0) -> tuple[bool, str]:
     """Simulate a short run and report whether the PID controller recentres the car."""
 
     print(
@@ -351,19 +336,6 @@ def _run_pid_centering_trial(offset_m: float, target_speed_mph: float = 25.0) ->
     target_speed_mph = min(target_speed_mph, max_speed_mph)
     throttle_cmd = 0.0
     throttle_alpha = 0.25  # keep throttle adjustments smooth
-
-    rows: list[dict] = []
-
-    def _flush_csv() -> Path:
-        _TRIAL_LOG_DIR.mkdir(parents=True, exist_ok=True)
-        sign = "pos" if offset_m >= 0 else "neg"
-        path = _TRIAL_LOG_DIR / f"trial_{sign}{abs(offset_m):.1f}m.csv"
-        if rows:
-            with open(path, "w", newline="") as f:
-                writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
-                writer.writeheader()
-                writer.writerows(rows)
-        return path
 
     for step_idx in range(steps):
         assert env.car is not None
@@ -399,47 +371,39 @@ def _run_pid_centering_trial(offset_m: float, target_speed_mph: float = 25.0) ->
         abs_error = abs(lateral_error)
 
         tele = env._build_snapshot(env._prev_velocity)  # type: ignore[attr-defined]
-        rows.append({
-            "t": round(step_idx * env.dt, 4),
-            "lateral_error_m": round(lateral_error, 4),
-            "steer": round(info["driver_command"]["steer"], 4),
-            "lat_accel": round(tele.state.lat_accel, 4),
-            "target_lat": round(controller._last_target_lat, 4),  # type: ignore[attr-defined]
-            "lat_velocity": round(tele.state.lat_velocity, 4),
-            "heading_error": round(tele.target.heading_error, 4),
-            "v_ego": round(tele.state.v_ego, 3),
-            # PID breakdown
-            "pid_error": round(controller._last_pid_error, 4),  # type: ignore[attr-defined]
-            "p_term": round(controller._last_p_term, 5),  # type: ignore[attr-defined]
-            "i_term": round(controller._last_i_term, 5),  # type: ignore[attr-defined]
-            "d_term": round(controller._last_d_term, 5),  # type: ignore[attr-defined]
-            "pid_out": round(controller._last_pid_out, 5),  # type: ignore[attr-defined]
-            "ff": round(controller._last_ff, 5),  # type: ignore[attr-defined]
-        })
-
         if controller.enabled and not crossed_line and offset_m != 0.0:
             crossed_line = (lateral_error > 0) != (offset_m > 0)
         if crossed_line and abs_error > abs(offset_m) + 0.5:
+            t_now = round(step_idx * env.dt, 2)
+            tele = env._build_snapshot(env._prev_velocity)  # type: ignore[attr-defined]
+            print(
+                f"  DIVERGE at t={t_now}s: lat_err={lateral_error:.2f}m  "
+                f"steer={info['driver_command']['steer']:.3f}  "
+                f"lat_accel={tele.state.lat_accel:.2f}  "
+                f"lat_vel={tele.state.lat_velocity:.2f}  "
+                f"heading_err={tele.target.heading_error:.3f}"
+            )
             env.attach_controller(None)
             return False, (
                 f"offset={offset_m:.2f} m: crossed driveline but diverged "
-                f"(error {abs_error:.2f} m)"
-            ), _flush_csv()
+                f"(error {abs_error:.2f} m at t={t_now}s)"
+            )
 
         if abs_error <= tolerance_m:
             stable_time += env.dt
             if stable_time >= stable_required:
                 env.attach_controller(None)
-                return True, "", _flush_csv()
+                return True, ""
         else:
             stable_time = 0.0
         last_error = abs_error
 
+    t_total = steps * env.dt
     env.attach_controller(None)
     return False, (
-        f"offset={offset_m:.2f} m: failed to centre within {max_time}s "
+        f"offset={offset_m:.2f} m: failed to centre within {t_total:.0f}s "
         f"(last error {last_error:.2f} m)"
-    ), _flush_csv()
+    )
 
 
 def test_pid_recenters_from_lateral_offsets():
@@ -447,20 +411,10 @@ def test_pid_recenters_from_lateral_offsets():
 
     offsets_m = (1.0, -1.0, 3.0, -3.0)  # ~3 ft and ~10 ft on both sides
     failures = []
-    csv_paths = []
     for offset in offsets_m:
-        ok, message, csv_path = _run_pid_centering_trial(offset)
-        csv_paths.append(csv_path)
+        ok, message = _run_pid_centering_trial(offset)
         if not ok:
             failures.append(message)
-
-    print("\n--- diagnostic plots ---")
-    for csv_path in csv_paths:
-        if csv_path.exists():
-            png = _plot_trial_csv(csv_path)
-            print(f"  {png}")
-            pid_png = _plot_pid_csv(csv_path)
-            print(f"  {pid_png}")
 
     if failures:
         pytest.fail("\n".join(failures))
@@ -540,14 +494,16 @@ def _run_s_curve_trial(
     direction: float,
     label: str,
     max_s_error_m: float = 2.0,
-) -> tuple[bool, str, Path, list[tuple[float, float]], float, float]:
+    target_speed_mph: float = 20.0,
+    controller_class=None,
+) -> tuple[bool, str]:
     """Drive the car through an S-curve road and check lateral tracking.
 
     Success:
       * During S-curve  : max |lateral_error| < max_s_error_m (default 2.0 m)
       * Exit straight   : within ±0.5 m for 5 s continuously
 
-    Returns ``(ok, message, csv_path, drive_line, z_s_start, z_s_end)``.
+    Returns ``(ok, message)``.
     """
     print(f"\n\n=== S-curve trial: {label} ===")
 
@@ -564,7 +520,13 @@ def _run_s_curve_trial(
         f"amplitude=5 m, direction={direction:+.0f}"
     )
 
-    speed_limits = ({"start_s": 0.0, "end_s": float("inf"), "speed_mph": 30.0},)
+    # Keep planner preview curvature consistent with the speed under test.
+    # The PID feedforward uses planner future lat_accel, which scales with the
+    # plan speed limit. A fixed 30 mph limit makes the 60 mph trial under-drive
+    # feedforward and diverge from the sweep harness.
+    speed_limits = (
+        {"start_s": 0.0, "end_s": float("inf"), "speed_mph": target_speed_mph * 1.25},
+    )
     plan = {
         "lane_width": 3.6, "lanes": 1, "shoulder": 1.5,
         "road_height": 0.02, "cross_pitch": 0.0,
@@ -581,9 +543,9 @@ def _run_s_curve_trial(
         env.init_renderer()
         ensure_drive_line_layer(env)
 
-    # Place car on road at terrain.height * 0.25, heading forward at 20 mph.
+    # Place car on road at terrain.height * 0.25, heading forward at target speed.
     assert env.car is not None
-    initial_mps = 20.0 / MPS_TO_MPH
+    initial_mps = target_speed_mph / MPS_TO_MPH
     z0 = env.terrain.height * 0.25
     y0 = env.terrain.get_height(center_x, z0) + env.car.cg_height_m
     env.car.body.pos = np.array([center_x, y0, z0], dtype=float)
@@ -593,12 +555,12 @@ def _run_s_curve_trial(
     env._prev_velocity = env.car.body.vel.copy()  # type: ignore[attr-defined]
     env._refresh_initial_telemetry()  # type: ignore[attr-defined]
 
-    controller = PIDSteeringController()
+    ctrl_cls = controller_class if controller_class is not None else PIDSteeringController
+    controller = ctrl_cls()
     env.attach_controller(controller)
     controller.enable()
 
-    target_speed_mph = 20.0
-    max_speed_mph = 30.0
+    max_speed_mph = target_speed_mph + 10.0
     throttle_cmd = 0.0
     throttle_alpha = 0.25
 
@@ -610,18 +572,6 @@ def _run_s_curve_trial(
     exit_stable_req = 5.0
     exit_tol = 0.5
     past_s_curve = False
-
-    rows: list[dict] = []
-
-    def _flush_csv() -> Path:
-        _TRIAL_LOG_DIR.mkdir(parents=True, exist_ok=True)
-        path = _TRIAL_LOG_DIR / f"s_curve_{label}.csv"
-        if rows:
-            with open(path, "w", newline="") as f:
-                writer = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
-                writer.writeheader()
-                writer.writerows(rows)
-        return path
 
     for step_idx in range(steps):
         assert env.car is not None
@@ -657,30 +607,11 @@ def _run_s_curve_trial(
             return (
                 False,
                 f"{label}: car left terrain at z={car_z:.0f} m",
-                _flush_csv(), drive_line, z_s_start, z_s_end,
             )
         assert not truncated, "simulation truncated"
 
         tele = env._build_snapshot(env._prev_velocity)  # type: ignore[attr-defined]
         lat_error = tele.target.lateral_error
-
-        rows.append({
-            "t": round(step_idx * env.dt, 4),
-            "car_x": round(car_x, 3),
-            "car_z": round(car_z, 3),
-            "lateral_error_m": round(lat_error, 4),
-            "steer": round(info["driver_command"]["steer"], 4),
-            "lat_accel": round(tele.state.lat_accel, 4),
-            "target_lat": round(controller._last_target_lat, 4),  # type: ignore[attr-defined]
-            "v_ego": round(tele.state.v_ego, 3),
-            "base_target_lat": round(controller._last_base_target_lat, 4),  # type: ignore[attr-defined]
-            "heading_error": round(tele.target.heading_error, 4),
-            "lat_velocity": round(tele.state.lat_velocity, 4),
-            "ff": round(controller._last_ff, 5),  # type: ignore[attr-defined]
-            "pid_out": round(controller._last_pid_out, 5),  # type: ignore[attr-defined]
-            "pid_error": round(controller._last_pid_error, 4),  # type: ignore[attr-defined]
-            "lateral_term": round(controller._last_lateral_term, 4),  # type: ignore[attr-defined]
-        })
 
         if z_s_start <= car_z <= z_s_end:
             s_max_error = max(s_max_error, abs(lat_error))
@@ -689,7 +620,6 @@ def _run_s_curve_trial(
                 return (
                     False,
                     f"{label}: s_max_error exceeded {max_s_error_m:.1f}m ({s_max_error:.2f}m) at z={car_z:.0f}",
-                    _flush_csv(), drive_line, z_s_start, z_s_end,
                 )
 
         if car_z > z_s_end:
@@ -702,116 +632,48 @@ def _run_s_curve_trial(
                         True,
                         f"{label}: s_max_error={s_max_error:.2f} m, "
                         f"settled ±{exit_tol} m on exit straight",
-                        _flush_csv(), drive_line, z_s_start, z_s_end,
                     )
             else:
                 exit_stable_time = 0.0
 
     env.attach_controller(None)
-    csv_path = _flush_csv()
-
     if not past_s_curve:
         return (
             False,
             f"{label}: car never reached S-curve end (z_s_end={z_s_end:.0f} m)",
-            csv_path, drive_line, z_s_start, z_s_end,
         )
     return (
         False,
         f"{label}: s_max_error={s_max_error:.2f} m, "
         f"did not settle ±{exit_tol} m for {exit_stable_req} s "
         f"(exit_stable_time={exit_stable_time:.1f} s)",
-        csv_path, drive_line, z_s_start, z_s_end,
     )
 
 
-def _plot_s_curve_trial(
-    csv_path: Path,
-    drive_line: list[tuple[float, float]],
-    z_s_start: float,
-    z_s_end: float,
-) -> Path:
-    """Render a top-down path map + lateral-error time-series and return the PNG path."""
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    times, car_xs, car_zs, lat_errs = [], [], [], []
-    with open(csv_path) as f:
-        for row in csv.DictReader(f):
-            times.append(float(row["t"]))
-            car_xs.append(float(row["car_x"]))
-            car_zs.append(float(row["car_z"]))
-            lat_errs.append(float(row["lateral_error_m"]))
-
-    dl_xs = [p[0] for p in drive_line]
-    dl_zs = [p[1] for p in drive_line]
-
-    fig, axes = plt.subplots(1, 2, figsize=(16, 7))
-    fig.suptitle(csv_path.stem.replace("_", " "), fontsize=13)
-
-    # Top-down path (z = forward on x-axis, x = lateral on y-axis)
-    ax = axes[0]
-    ax.axvspan(z_s_start, z_s_end, alpha=0.10, color="orange", label="S-curve zone", zorder=0)
-    ax.plot(dl_zs, dl_xs, color="gray", linewidth=2.0, label="drive line", zorder=1)
-    ax.plot(car_zs, car_xs, color="steelblue", linewidth=1.0, alpha=0.8, label="car path", zorder=2)
-    ax.set_xlabel("z — forward (m)")
-    ax.set_ylabel("x — lateral (m)")
-    ax.set_title("Top-down path")
-    ax.legend(loc="best", fontsize=8)
-    ax.grid(True, alpha=0.3)
-
-    # Lateral error over time
-    ax = axes[1]
-    ax.axhline(0, color="k", linewidth=0.5)
-    ax.axhline(0.5, color="gray", linewidth=0.8, linestyle="--", label="±0.5 m band")
-    ax.axhline(-0.5, color="gray", linewidth=0.8, linestyle="--")
-    ax.axhline(1.5, color="salmon", linewidth=0.8, linestyle=":", label="±1.5 m limit")
-    ax.axhline(-1.5, color="salmon", linewidth=0.8, linestyle=":")
-    ax.plot(times, lat_errs, color="steelblue", linewidth=1.0, label="lateral error (m)")
-    ax.set_xlabel("time (s)")
-    ax.set_ylabel("lateral error (m)")
-    ax.set_title("Lateral error vs time")
-    ax.legend(loc="upper right", fontsize=8)
-    ax.grid(True, alpha=0.3)
-
-    fig.tight_layout()
-    png_path = csv_path.with_suffix(".png")
-    fig.savefig(png_path, dpi=120, bbox_inches="tight")
-    plt.close(fig)
-    return png_path
-
-
 def test_pid_follows_s_curve():
-    """PID must track a straight → S-curve → straight road at 20 mph (capped 30 mph).
-
-    Two mirror-image variants are tested:
-      * left_first  : road curves left then right before straightening
-      * right_first : road curves right then left before straightening
+    """PID must track a straight → S-curve → straight road at 20, 40, and 60 mph.
 
     Success criteria:
-      * S-curve section  : max |lateral_error| < 1.5 m
+      * S-curve section  : max |lateral_error| < 3.0 m  (60 % of 5 m amplitude)
       * Exit straight    : within ±0.5 m for 5 s continuously
     """
-    trials = [(1.0, "left_first"), (-1.0, "right_first")]
+    trials = [
+        (1.0, "left_first_20mph", 20.0, 3.0),
+        (-1.0, "right_first_20mph", 20.0, 3.0),
+        (1.0, "left_first_40mph", 40.0, 3.0),
+        (-1.0, "right_first_40mph", 40.0, 3.0),
+        (1.0, "left_first_60mph", 60.0, 3.0),
+        (-1.0, "right_first_60mph", 60.0, 3.0),
+    ]
     failures: list[str] = []
-    plots: list[Path] = []
 
-    for direction, label in trials:
-        ok, msg, csv_path, drive_line, z_s_start, z_s_end = _run_s_curve_trial(
-            direction, label
+    for direction, label, speed_mph, max_err in trials:
+        ok, msg = _run_s_curve_trial(
+            direction, label, max_s_error_m=max_err, target_speed_mph=speed_mph
         )
         print(f"  {label}: {'PASS' if ok else 'FAIL'} — {msg}")
-        if VISUALIZE and csv_path.exists():
-            png = _plot_s_curve_trial(csv_path, drive_line, z_s_start, z_s_end)
-            plots.append(png)
         if not ok:
             failures.append(msg)
-
-    if plots:
-        print("\n--- S-curve plots ---")
-        for p in plots:
-            print(f"  {p}")
 
     if failures:
         pytest.fail("\n".join(failures))
