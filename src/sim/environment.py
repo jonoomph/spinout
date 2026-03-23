@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import math
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Dict, Optional, Tuple
@@ -87,8 +88,15 @@ class Environment:
         Optional dictionary with configuration overrides.  The most relevant
         keys are:
 
+        ``render_fps`` (float): Target render cadence for eval mode. When
+                             ``dt`` is omitted in eval mode, the outer
+                             simulation step defaults to ``1 / render_fps``.
+        ``physics_hz`` (float): Target internal physics frequency. When
+                             ``substeps`` is omitted, it is derived from
+                             ``physics_hz * dt``.
         ``dt`` (float):      Size of each simulation step in seconds.
         ``substeps`` (int):  Number of physics sub-steps per step.
+        ``realtime`` (bool): In eval mode, pace simulation against wall clock.
         ``max_steps`` (int): Maximum number of steps per episode.
         ``time_limit`` (float): Optional wall clock time limit for an episode.
         ``cost_limit`` (float): Optional accumulated cost limit for an episode.
@@ -116,8 +124,25 @@ class Environment:
         self._status_message = ""
 
         # Simulation parameters -------------------------------------------------
-        self.dt = float(self.cfg.get("dt", 0.01))
-        self.substeps = int(self.cfg.get("substeps", 5))
+        self.render_fps = float(self.cfg.get("render_fps", 60.0))
+        dt_cfg = self.cfg.get("dt")
+        substeps_cfg = self.cfg.get("substeps")
+        physics_hz_cfg = self.cfg.get("physics_hz")
+
+        if dt_cfg is None and self.mode == "eval" and self.render_fps > 0.0:
+            dt_value = 1.0 / self.render_fps
+        else:
+            dt_value = float(dt_cfg) if dt_cfg is not None else 0.01
+
+        if physics_hz_cfg is not None and substeps_cfg is None:
+            target_physics_hz = max(float(physics_hz_cfg), 1e-6)
+            derived_substeps = max(1, int(round(target_physics_hz * dt_value)))
+            self.substeps = derived_substeps
+        else:
+            self.substeps = int(substeps_cfg if substeps_cfg is not None else 5)
+
+        self.dt = float(dt_value)
+        self.realtime = bool(self.cfg.get("realtime", self.mode == "eval"))
         self.max_steps = (
             int(self.cfg["max_steps"]) if "max_steps" in self.cfg else None
         )
@@ -145,8 +170,8 @@ class Environment:
         self._last_driver_command = DriverCommand()
         self._controller_hud = ("No Controller", "Manual Steer")
         self._controller_enabled_last_step = False
-        self.render_fps = float(self.cfg.get("render_fps", 60.0))
         self._render_accum = 0.0
+        self._realtime_anchor: Optional[float] = None
 
         # Rendering state ------------------------------------------------------
         self.render_mode = 1
@@ -203,6 +228,9 @@ class Environment:
             return
         rate = max(float(self._controller.control_rate_hz), 1e-3)
         self._controller_period = 1.0 / rate
+
+    def _physics_rate_hz(self) -> float:
+        return 1.0 / max(self.dt / max(self.substeps, 1), 1e-9)
 
     def _resolve_hud_labels(self) -> Tuple[str, str]:
         if self._controller is not None and self._controller.enabled:
@@ -443,6 +471,7 @@ class Environment:
         self.time = 0.0
         self.episode_cost = 0.0
         self.termination_reason = None
+        self._realtime_anchor = None
 
     def _set_surface(self, weather: str, terrain_type: str) -> None:
         """Update terrain/weather without regenerating the world."""
@@ -594,6 +623,7 @@ class Environment:
         self.time = 0.0
         self.episode_cost = 0.0
         self.termination_reason = None
+        self._realtime_anchor = None
 
     # ------------------------------------------------------------------
     # Rendering helpers
@@ -861,6 +891,7 @@ class Environment:
         )
         pygame.display.set_caption("Spinout")
         self.clock = pygame.time.Clock()
+        self._realtime_anchor = None
         self.render_ctx = RenderContext(self.width, self.height)
         # Optional: align sun to configured/local time instead of random sample
         if self.cfg.get("sun_use_local_time"):
@@ -1033,7 +1064,7 @@ class Environment:
 
         speed_mph = np.linalg.norm(self.car.body.vel) * 2.23694
         fps_r = self.clock.get_fps()
-        fps_p = 1.0 / max(self.dt / max(self.substeps, 1), 1e-9)
+        fps_p = self._physics_rate_hz()
         steer_angle = next(w.steer_angle for w in self.car.wheels if w.is_front)
         wind_speed = 0.0
         wind_dir = 0.0
@@ -1104,6 +1135,7 @@ class Environment:
         self._controller_timer = 0.0
         self._controller_last_command = None
         self._render_accum = 0.0
+        self._realtime_anchor = None
         if self._controller is not None:
             self._update_controller_period()
             self._controller.reset()
@@ -1116,6 +1148,143 @@ class Environment:
         """Assemble the observation dict for the current state."""
 
         return self._telemetry.as_observation()
+
+    # ------------------------------------------------------------------
+    def _eval_step_budget(self) -> int:
+        """Return how many fixed simulation steps to execute this call."""
+
+        if not self.realtime or self.dt <= 0.0:
+            return 1
+
+        now = time.perf_counter()
+        if self._realtime_anchor is None:
+            self._realtime_anchor = now - self.time
+
+        target = self._realtime_anchor + self.time + self.dt
+        remaining = target - now
+        if remaining > 0.0:
+            time.sleep(remaining)
+            return 1
+
+        lag = now - target
+        steps = 1 + int(lag / self.dt)
+        return steps
+
+    def _advance_once(self, manual_cmd: DriverCommand):
+        """Advance the simulation by one fixed outer step."""
+
+        controller_preview = None
+        controller_enabled = self._controller is not None and self._controller.enabled
+        if controller_enabled:
+            controller_preview = self._controller.preview_rate_hz
+            if not self._controller_enabled_last_step:
+                self._controller_last_command = None
+                self._controller_timer = 0.0
+        telemetry_before = self._build_snapshot(
+            self._prev_velocity,
+            preview_hz=controller_preview,
+        )
+
+        applied_cmd = manual_cmd
+        if controller_enabled:
+            period = self._controller_period or self.dt
+            self._controller_timer += self.dt
+            needs_update = (
+                self._controller_last_command is None
+                or self._controller_timer >= max(period - 1e-9, 0.0)
+            )
+            if needs_update:
+                applied_cmd = (
+                    self._controller
+                    .step(telemetry_before, manual_cmd)
+                    .clipped()
+                )
+                self._controller_last_command = applied_cmd
+                self._controller_timer = 0.0
+            else:
+                applied_cmd = self._controller_last_command or manual_cmd
+        else:
+            self._controller_last_command = None
+            self._controller_timer = 0.0
+
+        self._last_driver_command = applied_cmd
+        self._controller_hud = self._resolve_hud_labels()
+        self._controller_enabled_last_step = controller_enabled
+
+        self.car.steer = float(applied_cmd.steer)
+        self.car.accel = float(applied_cmd.throttle)
+        self.car.brake = float(applied_cmd.brake)
+
+        if self.wind_system is not None:
+            self.wind_sample = self.wind_system.update(self.dt)
+            if self.car is not None:
+                self.car.set_wind(self.wind_sample.vector)
+        else:
+            if self.car is not None:
+                self.car.set_wind(None)
+        if getattr(self, "render_ctx", None) and self.car is not None:
+            self.car.show_wind_vectors = self.wind_vectors_enabled
+
+        sub_dt = self.dt / self.substeps
+        velocity_before = self.car.body.vel.copy()
+        for _ in range(self.substeps):
+            self.car.update(sub_dt)
+            events = getattr(self.car, "slip_events", [])
+            self.skidmarks.step(sub_dt, events)
+
+        self.step_count += 1
+        self.time += self.dt
+
+        self._telemetry = self._build_snapshot(velocity_before)
+        self._prev_velocity = velocity_before
+        obs = self._get_obs()
+
+        step_cost = self.dt
+        self.episode_cost += step_cost
+
+        terminated = False
+        self.termination_reason = None
+        pos = self.car.body.pos
+        if (
+            pos[0] < 0
+            or pos[0] > self.terrain.width
+            or pos[2] < 0
+            or pos[2] > self.terrain.height
+        ):
+            terminated = True
+            self.termination_reason = "off_terrain"
+        elif getattr(self.car, "is_upside_down", False):
+            terminated = True
+            self.termination_reason = "crash"
+
+        truncated = False
+        trunc_reason = None
+        if self.max_steps is not None and self.step_count >= self.max_steps:
+            truncated = True
+            trunc_reason = "max_steps"
+        elif self.time_limit is not None and self.time >= self.time_limit:
+            truncated = True
+            trunc_reason = "time_limit"
+        elif self.cost_limit is not None and self.episode_cost >= self.cost_limit:
+            truncated = True
+            trunc_reason = "cost_limit"
+
+        info = {
+            "step_cost": step_cost,
+            "episode_cost": self.episode_cost,
+            "plan": self.plan,
+            "driver_command": self._last_driver_command.as_dict(),
+            "telemetry": self._telemetry.as_observation(),
+        }
+        if self._controller is not None and self._controller.enabled:
+            info["controller"] = self._controller.name
+        if terminated:
+            info["reason"] = self.termination_reason
+        elif truncated:
+            info["reason"] = trunc_reason
+
+        reward = -step_cost
+        return obs, reward, terminated, truncated, info
 
     # ------------------------------------------------------------------
     def step(self, command: DriverCommand | Dict[str, float] | None = None, events=None):
@@ -1183,132 +1352,40 @@ class Environment:
             else DriverCommand.from_action(command)
         ).clipped()
 
-        controller_preview = None
-        controller_enabled = self._controller is not None and self._controller.enabled
-        if controller_enabled:
-            controller_preview = self._controller.preview_rate_hz
-            if not self._controller_enabled_last_step:
-                self._controller_last_command = None
-                self._controller_timer = 0.0
-        telemetry_before = self._build_snapshot(
-            self._prev_velocity,
-            preview_hz=controller_preview,
-        )
+        steps_to_run = 1
+        if self.mode == "eval":
+            steps_to_run = self._eval_step_budget()
 
-        applied_cmd = manual_cmd
-        if controller_enabled:
-            period = self._controller_period or self.dt
-            self._controller_timer += self.dt
-            needs_update = (
-                self._controller_last_command is None
-                or self._controller_timer >= max(period - 1e-9, 0.0)
-            )
-            if needs_update:
-                applied_cmd = (
-                    self._controller
-                    .step(telemetry_before, manual_cmd)
-                    .clipped()
-                )
-                self._controller_last_command = applied_cmd
-                self._controller_timer = 0.0
-            else:
-                applied_cmd = self._controller_last_command or manual_cmd
-        else:
-            self._controller_last_command = None
-            self._controller_timer = 0.0
-
-        self._last_driver_command = applied_cmd
-        self._controller_hud = self._resolve_hud_labels()
-        self._controller_enabled_last_step = controller_enabled
-
-        self.car.steer = float(applied_cmd.steer)
-        self.car.accel = float(applied_cmd.throttle)
-        self.car.brake = float(applied_cmd.brake)
-
-        if self.wind_system is not None:
-            self.wind_sample = self.wind_system.update(self.dt)
-            if self.car is not None:
-                self.car.set_wind(self.wind_sample.vector)
-        else:
-            if self.car is not None:
-                self.car.set_wind(None)
-        if getattr(self, "render_ctx", None) and self.car is not None:
-            self.car.show_wind_vectors = self.wind_vectors_enabled
-
-        sub_dt = self.dt / self.substeps
-        velocity_before = self.car.body.vel.copy()
-        for _ in range(self.substeps):
-            self.car.update(sub_dt)
-            events = getattr(self.car, "slip_events", [])
-            self.skidmarks.step(sub_dt, events)
-
-        self.step_count += 1
-        self.time += self.dt
-
-        self._telemetry = self._build_snapshot(velocity_before)
-        # ``_prev_velocity`` should always contain the velocity from the start
-        # of the last physics step so that the next controller tick observes
-        # the most recent acceleration.  This ensures that lateral acceleration
-        # reported to controllers reflects the change in velocity that occurred
-        # during the previous update rather than the (already updated) current
-        # velocity, which would otherwise appear as zero acceleration.
-        self._prev_velocity = velocity_before
+        total_reward = 0.0
+        steps_ran = 0
         obs = self._get_obs()
-
-        # Cost-first logic: each step incurs a time cost.  Reward is negative
-        # cost so RL algorithms can still optimise it in the usual manner.
-        step_cost = self.dt
-        self.episode_cost += step_cost
-
         terminated = False
-        self.termination_reason = None
-        pos = self.car.body.pos
-        if (
-            pos[0] < 0
-            or pos[0] > self.terrain.width
-            or pos[2] < 0
-            or pos[2] > self.terrain.height
-        ):
-            terminated = True
-            self.termination_reason = "off_terrain"
-        elif getattr(self.car, "is_upside_down", False):
-            terminated = True
-            self.termination_reason = "crash"
-
         truncated = False
-        trunc_reason = None
-        if self.max_steps is not None and self.step_count >= self.max_steps:
-            truncated = True
-            trunc_reason = "max_steps"
-        elif self.time_limit is not None and self.time >= self.time_limit:
-            truncated = True
-            trunc_reason = "time_limit"
-        elif self.cost_limit is not None and self.episode_cost >= self.cost_limit:
-            truncated = True
-            trunc_reason = "cost_limit"
-
         info = {
-            "step_cost": step_cost,
+            "step_cost": 0.0,
             "episode_cost": self.episode_cost,
             "plan": self.plan,
             "driver_command": self._last_driver_command.as_dict(),
             "telemetry": self._telemetry.as_observation(),
         }
-        if self._controller is not None and self._controller.enabled:
-            info["controller"] = self._controller.name
-        if terminated:
-            info["reason"] = self.termination_reason
-        elif truncated:
-            info["reason"] = trunc_reason
+        for _ in range(steps_to_run):
+            obs, reward, terminated, truncated, info = self._advance_once(manual_cmd)
+            total_reward += reward
+            steps_ran += 1
+            if terminated or truncated:
+                break
 
-        reward = -step_cost
+        if steps_ran > 1:
+            info["step_cost"] = self.dt * steps_ran
+            info["sim_steps"] = steps_ran
+
         if self.mode == "eval" and getattr(self, "render_ctx", None):
             render_period = 0.0 if self.render_fps <= 0.0 else 1.0 / self.render_fps
-            self._render_accum += self.dt
+            sim_advanced = self.dt * steps_ran
+            self._render_accum += sim_advanced
             if render_period <= 0.0 or self._render_accum >= render_period - 1e-9:
-                render_dt = self._render_accum if render_period > 0.0 else self.dt
+                render_dt = self._render_accum if render_period > 0.0 else sim_advanced
                 self._render(render_dt)
                 self._render_accum = 0.0
-                if self.render_fps > 0.0:
-                    self.clock.tick(int(round(self.render_fps)))
-        return obs, reward, terminated, truncated, info
+                self.clock.tick()
+        return obs, total_reward, terminated, truncated, info

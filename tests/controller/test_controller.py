@@ -86,6 +86,12 @@ def test_controller_runs_at_declared_frequency():
     assert all(abs(val - 0.1) < 1e-6 for val in applied)
 
 
+def test_eval_defaults_can_derive_dt_and_substeps_from_rates():
+    env = Environment({"render_fps": 60.0, "physics_hz": 300.0}, mode="eval")
+    assert env.dt == pytest.approx(1.0 / 60.0)
+    assert env.substeps == 5
+
+
 def test_pid_reacts_to_lateral_error():
     snapshot = TelemetrySnapshot(
         state=VehicleState(v_ego=15.0, lat_velocity=0.0, lat_accel=0.0),

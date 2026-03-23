@@ -171,19 +171,15 @@ def _shear_surface(surf: pygame.Surface, shear: float) -> Tuple[pygame.Surface, 
     return sheared, bottom_left
 
 
-def _load_environment(progress: Dict[str, float]) -> Tuple[Environment, Dict]:
+def _load_environment(progress: Dict[str, float], env_cfg: Optional[Dict] = None) -> Tuple[Environment, Dict]:
     """Create the environment while streaming progress updates."""
 
     def status_cb(p: float, _msg: str) -> None:
         progress["target"] = max(progress.get("target", 0.0), p)
 
+    cfg = dict(env_cfg or {})
     env = Environment(
-        cfg={
-            "dt": 1 / 120,
-            #"weather": "wet",
-            #"precipitation": "rain",
-            #"precipitation_strength": 1.0,
-        },
+        cfg=cfg,
         mode="eval",
         status_callback=status_cb,
     )
@@ -193,7 +189,11 @@ def _load_environment(progress: Dict[str, float]) -> Tuple[Environment, Dict]:
     return env, obs
 
 
-def run(screen: pygame.Surface, config: SplashConfig = SplashConfig()) -> Tuple[Environment, Dict]:
+def run(
+    screen: pygame.Surface,
+    config: SplashConfig = SplashConfig(),
+    env_cfg: Optional[Dict] = None,
+) -> Tuple[Environment, Dict]:
     """Render the animated splash screen on ``screen``.
 
     ``Environment.reset`` executes on a background thread while a progress bar
@@ -231,7 +231,7 @@ def run(screen: pygame.Surface, config: SplashConfig = SplashConfig()) -> Tuple[
 
     def env_thread() -> None:
         try:
-            env, obs = _load_environment(progress)
+            env, obs = _load_environment(progress, env_cfg=env_cfg)
             env_container["env"] = env
             obs_container["obs"] = obs
         except BaseException as e:  # capture and re-raise later

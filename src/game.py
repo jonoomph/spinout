@@ -20,6 +20,11 @@ from src.sim.controls import (
     BRAKE_MAX,
 )
 
+DEFAULT_GAME_ENV_CFG = {
+    "render_fps": 60,
+    "physics_hz": 300,
+}
+
 
 def main() -> None:
     pygame.init()
@@ -29,7 +34,7 @@ def main() -> None:
     pygame.display.set_caption("SPINOUT")
 
     # Show the animated splash screen while the environment initialises.
-    env, obs = splash.run(screen)
+    env, obs = splash.run(screen, env_cfg=DEFAULT_GAME_ENV_CFG)
 
     controller = PIDSteeringController()
     controller.attach(env)
@@ -73,4 +78,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
