@@ -26,6 +26,8 @@ class PlannerConfig:
 
     preview_hz: float = 10.0
     horizon_seconds: float = 5.0
+    sample_spacing_m: float = 0.25
+    spline_tension: float = 0.0
 
 
 class PlannerPreviewer:
@@ -33,6 +35,7 @@ class PlannerPreviewer:
 
     def __init__(self, config: PlannerConfig | None = None) -> None:
         self.config = config or PlannerConfig()
+        self.control_positions = np.zeros((0, 2), dtype=float)
         self.positions = np.zeros((0, 2), dtype=float)
         self.s = np.zeros(0, dtype=float)
         self.tangents = np.zeros((0, 2), dtype=float)
@@ -43,6 +46,7 @@ class PlannerPreviewer:
 
     def set_plan(self, drive_line: Sequence[Sequence[float]] | None, speed_limits: Iterable[dict] | None) -> None:
         if not drive_line:
+            self.control_positions = np.zeros((0, 2), dtype=float)
             self.positions = np.zeros((0, 2), dtype=float)
             self.s = np.zeros(0, dtype=float)
             self.tangents = np.zeros((0, 2), dtype=float)
@@ -54,12 +58,14 @@ class PlannerPreviewer:
         pts = np.array([[p[0], p[1]] for p in drive_line], dtype=float)
         if pts.ndim != 2 or pts.shape[0] < 2:
             raise ValueError("drive_line must contain at least two points")
-        self.positions = pts
-        diffs = np.diff(pts, axis=0)
+        self.control_positions = pts
+        sampled, sampled_tangents, _sampled_curvature = self._sample_smooth_path(pts)
+        self.positions = sampled
+        diffs = np.diff(sampled, axis=0)
         ds = np.linalg.norm(diffs, axis=1)
         self.s = np.concatenate(([0.0], np.cumsum(ds)))
-        self.tangents = self._compute_tangents(pts, self.s)
-        self.curvature = self._compute_curvature(pts)
+        self.tangents = sampled_tangents
+        self.curvature = self._compute_curvature(sampled)
         self.speed_limits = list(speed_limits or [])
         self._last_projection = None
         self._last_index = None
@@ -267,13 +273,97 @@ class PlannerPreviewer:
         tangents = tangents / np.maximum(norms, 1e-9)
         return tangents
 
+    def _sample_smooth_path(self, control_pts: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        if control_pts.shape[0] < 3:
+            diffs = np.diff(control_pts, axis=0)
+            if diffs.shape[0] == 0:
+                tangents = np.array([[1.0, 0.0]], dtype=float)
+            else:
+                tangents = np.vstack((diffs[0], diffs))
+                norms = np.linalg.norm(tangents, axis=1, keepdims=True)
+                tangents = tangents / np.maximum(norms, 1e-9)
+            curvature = np.zeros(control_pts.shape[0], dtype=float)
+            return control_pts.copy(), tangents, curvature
+
+        n = control_pts.shape[0]
+        deriv = np.zeros_like(control_pts)
+        tension = max(0.0, min(float(self.config.spline_tension), 1.0))
+        scale = 1.0 - tension
+        deriv[0] = scale * 0.5 * (-3.0 * control_pts[0] + 4.0 * control_pts[1] - control_pts[2])
+        deriv[-1] = scale * 0.5 * (3.0 * control_pts[-1] - 4.0 * control_pts[-2] + control_pts[-3])
+        for i in range(1, n - 1):
+            deriv[i] = scale * 0.5 * (control_pts[i + 1] - control_pts[i - 1])
+
+        spacing = max(float(self.config.sample_spacing_m), 0.05)
+        samples: list[np.ndarray] = [control_pts[0]]
+        tangents: list[np.ndarray] = []
+        curvature: list[float] = []
+        for i in range(n - 1):
+            p0 = control_pts[i]
+            p1 = control_pts[i + 1]
+            m0 = deriv[i]
+            m1 = deriv[i + 1]
+            seg_len = float(np.linalg.norm(p1 - p0))
+            steps = max(2, int(math.ceil(seg_len / spacing)))
+            start = 0 if i == 0 else 1
+            for j in range(start, steps + 1):
+                t = j / steps
+                h00 = 2.0 * t * t * t - 3.0 * t * t + 1.0
+                h10 = t * t * t - 2.0 * t * t + t
+                h01 = -2.0 * t * t * t + 3.0 * t * t
+                h11 = t * t * t - t * t
+                pos = h00 * p0 + h10 * m0 + h01 * p1 + h11 * m1
+                dp = (
+                    (6.0 * t * t - 6.0 * t) * p0
+                    + (3.0 * t * t - 4.0 * t + 1.0) * m0
+                    + (-6.0 * t * t + 6.0 * t) * p1
+                    + (3.0 * t * t - 2.0 * t) * m1
+                )
+                ddp = (
+                    (12.0 * t - 6.0) * p0
+                    + (6.0 * t - 4.0) * m0
+                    + (-12.0 * t + 6.0) * p1
+                    + (6.0 * t - 2.0) * m1
+                )
+                dp_norm = float(np.linalg.norm(dp))
+                tangent = dp / max(dp_norm, 1e-9)
+                cross = dp[0] * ddp[1] - dp[1] * ddp[0]
+                kappa = float(cross / max(dp_norm ** 3, 1e-9))
+                samples.append(pos)
+                tangents.append(tangent)
+                curvature.append(kappa)
+
+        sampled = np.array(samples, dtype=float)
+        tangent_arr = np.array(tangents, dtype=float)
+        curvature_arr = np.array(curvature, dtype=float)
+        dedup_pos = [sampled[0]]
+        dedup_tan = [tangent_arr[0]]
+        dedup_curv = [curvature_arr[0]]
+        for idx, pt in enumerate(sampled[1:], start=1):
+            if np.linalg.norm(pt - dedup_pos[-1]) > 1e-9:
+                dedup_pos.append(pt)
+                dedup_tan.append(tangent_arr[idx - 1])
+                dedup_curv.append(curvature_arr[idx - 1])
+        return (
+            np.array(dedup_pos, dtype=float),
+            np.array(dedup_tan, dtype=float),
+            np.array(dedup_curv, dtype=float),
+        )
+
     def _compute_curvature(self, pts: np.ndarray) -> np.ndarray:
         n = pts.shape[0]
         curv = np.zeros(n, dtype=float)
         if n < 3:
             return curv
-        for i in range(1, n - 1):
-            p0, p1, p2 = pts[i - 1], pts[i], pts[i + 1]
+        step = max(1, min(3, (n - 1) // 8))
+        for i in range(n):
+            if i < step:
+                i0, i1, i2 = 0, min(step, n - 2), min(2 * step, n - 1)
+            elif i > n - 1 - step:
+                i0, i1, i2 = max(n - 1 - 2 * step, 0), max(n - 1 - step, 1), n - 1
+            else:
+                i0, i1, i2 = i - step, i, i + step
+            p0, p1, p2 = pts[i0], pts[i1], pts[i2]
             a = p1 - p0
             b = p2 - p1
             c = p2 - p0
@@ -286,14 +376,15 @@ class PlannerPreviewer:
                 continue
             cross = a[0] * b[1] - a[1] * b[0]
             curv[i] = 2.0 * cross / denom
-        curv[0] = curv[1]
-        curv[-1] = curv[-2]
         return curv
 
     def _curvature_at(self, s: float) -> float:
         if self.s.size == 0:
             return 0.0
         s_clamped = min(max(s, self.s[0]), self.s[-1])
+        margin = min(self.s[-1], max(self.config.sample_spacing_m * 4.0, 0.0))
+        if self.s[-1] > 2.0 * margin:
+            s_clamped = min(max(s_clamped, margin), self.s[-1] - margin)
         return float(np.interp(s_clamped, self.s, self.curvature))
 
     def _speed_limit_at(self, s: float) -> float:

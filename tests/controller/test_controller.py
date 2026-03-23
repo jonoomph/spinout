@@ -25,6 +25,7 @@ PID_DEBUG_PLOT_LABEL = os.environ.get("PID_DEBUG_PLOT_LABEL", "").strip()
 PID_DEBUG_PLOT_DIR = os.environ.get("PID_DEBUG_PLOT_DIR", "").strip()
 S_CURVE_CONTROL_HZ = float(os.environ.get("S_CURVE_CONTROL_HZ", "100.0"))
 S_CURVE_PHYSICS_HZ = float(os.environ.get("S_CURVE_PHYSICS_HZ", "300.0"))
+S_CURVE_POINT_SCALE = int(os.environ.get("S_CURVE_POINT_SCALE", "1"))
 MPS_TO_MPH = 2.2369362920544
 
 
@@ -253,11 +254,11 @@ def test_planner_preview_remains_stable_across_state_changes():
     )
 
     idx = 90
-    base_point = np.array(drive_line[idx])
-    tangent = np.array(drive_line[idx + 1]) - np.array(drive_line[idx])
-    tangent /= np.linalg.norm(tangent)
+    seed_point = np.array(drive_line[idx], dtype=float)
+    s_ref, _, _ = previewer._project((seed_point[0], 0.0, seed_point[1]))  # type: ignore[attr-defined]
+    base_point, tangent, _ = previewer._sample_path(s_ref)  # type: ignore[attr-defined]
     normal = np.array([-tangent[1], tangent[0]])
-    heading = math.atan2(tangent[1], tangent[0])
+    heading = math.atan2(tangent[0], tangent[1])
 
     speed = 12.0
     offsets = [0.0, 2.5, -2.5]
@@ -464,12 +465,13 @@ def _build_s_curve_drive_line(
     pts: list[tuple[float, float]] = []
 
     # --- entry straight ---
-    for i in range(100):
-        z = z_s_start * i / 99.0
+    n_entry = max(100, 100 * S_CURVE_POINT_SCALE)
+    for i in range(n_entry):
+        z = z_s_start * i / max(n_entry - 1, 1)
         pts.append((center_x, z))
 
     # --- S-curve (four smoothstep phases, zero slope at every key point) ---
-    n_s = 200
+    n_s = 200 * S_CURVE_POINT_SCALE
     for i in range(1, n_s + 1):
         t = i / n_s
         z = z_s_start + t * s_length_m
@@ -488,7 +490,7 @@ def _build_s_curve_drive_line(
         pts.append((center_x + dx, z))
 
     # --- exit straight ---
-    n_exit = 200
+    n_exit = 200 * S_CURVE_POINT_SCALE
     for i in range(1, n_exit + 1):
         t = i / n_exit
         z = z_s_end + t * (z_exit - z_s_end)
