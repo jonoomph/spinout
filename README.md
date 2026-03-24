@@ -12,78 +12,50 @@ Forget the bloated dependencies and high-fidelity rendering of other simulators�
 
 [Watch Video Demo](https://github.com/user-attachments/assets/329bb3c3-9c3f-4c3b-9294-0d1080335e63)
 
-![asphault.png](img/asphault.png)
-![snow.png](img/snow.png)
+![sunset.png](img/sunset.png)
+![grass.png](img/grass.png)
+![rain.png](img/rain.png)
 ![dirt.png](img/dirt.png)
-![gravel.png](img/gravel.png)
 
-**NOTE: This repo is a **work-in-progress**, and still has lots of work before it is useful.**
-
----
-## Features
-
-- **Accurate Car Physics**  
-  Simulates lateral & longitudinal forces (steer torque, accel, brake).
-  
-- **Random Terrain**  
-  Generates procedurally created hills and slopes for varied scenarios.
-
-- **OpenGL Accelerated**  
-  Low-poly rendering for fast visualization without sacrificing simulation speed.
-  
-- **Minimal Dependencies**  
-  Lightweight, clean Python package that's easy to install and run.
-
-## Coming Soon...
-
-- **Roads**  
-  Generates procedurally created roads & hazards for varied scenarios.
-  
-- **Built-in Planner & Scoring**  
-  Provides a baseline "brute-force" planner and scoring system for benchmarking.
-  
-- **Controller Plug-in**  
-  Easily test your own Python controllers: PID loops, ML models, or heuristic drivers.
+**Early-stage, but already usable for controller experiments and sim development.**
 
 ---
+## What It Does
+
+- **Drivable 3D sim, built for control work**  
+  Fast vehicle dynamics, procedural terrain, generated roads, and lightweight OpenGL rendering.
+
+- **Planner-aware controller interface**  
+  Controllers receive vehicle state plus path targets and fixed-rate preview data for steering and speed logic.
+
+- **Built-in baseline controller**  
+  Includes a PID steering controller with curvature and road-roll feedforward.
+
+- **Interactive and headless workflows**  
+  Run it as a visual demo, or use the Gym-style environment API for testing and training loops.
+
+- **Scenario variation out of the box**  
+  Different road surfaces, terrain types, weather modifiers, wind, buildings, and speed-limit signage.
 
 ## Quick Start
 
-### Install
 ```bash
 git clone https://github.com/jonoomph/spinout.git
 cd spinout
 pip install -r requirements.txt
+python -m src.game
 ```
 
-### Run
+Press `S` in the demo to toggle the built-in auto-steer controller.
+
+## For Developers
+
+Use the environment directly if you want to plug in your own controller or training loop. The simulator exposes normalized driver commands plus structured telemetry, planner targets, and preview horizons.
+
 ```bash
-python game.py
+pytest -q
 ```
 
-## Dependencies
+## Why Spinout
 
-| Package | Used for |
-| ------- | -------- |
-| `numpy` | Vector math for physics, terrain generation, and utilities |
-| `noise` | Perlin noise to randomize roads and terrain |
-| `scipy` | Gaussian filters and interpolation for smooth surfaces |
-| `moderngl` | OpenGL context and rendering |
-| `pygame` | Window management, input handling, and HUD surfaces |
-| `matplotlib` | Optional debug plots for road planning |
-| `pillow` | Loading textures for models and signs |
-| `pytest` | Test suite execution |
-| `pytest-xdist` | Parallelizing pytest runs |
-
-## Inspiration
-
-This project is inspired by the Comma.ai [controls challenge](https://github.com/jonoomph/controls_challenge), 
-where I submitted an award-winning entry, using a neural network trained by a simple 2D driving game. This project
-is an extension of that work, and will focus on 3D simulation of car dynamics on random terrain. The goal is to 
-provide a fast, simple, and powerful training simulator for self-driving controllers, which focuses on both lateral and 
-longitudal controls.
-
-## About Me
-I love working on AI, simulators, games, self-driving, and related tech, and I’m always interested in great conversations 
-around these topics. If this project sparks ideas, or you’d like to discuss related work, feel free to reach 
-out at jonathan@openshot.org.
+Spinout is aimed at the gap between toy 2D controller demos and heavyweight driving stacks: fast to iterate on, grounded in real control problems, and simple enough to modify.
