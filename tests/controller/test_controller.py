@@ -17,6 +17,7 @@ from src.sim.control_api import (
 )
 from src.sim.environment import Environment
 from src.sim.planner import PlannerPreviewer
+from src.sim.roads.build import apply_plan
 from tests.helpers import configure_flat_drive_line, ensure_drive_line_layer
 
 VISUALIZE = bool(int(os.environ.get("VISUALIZE", "0")))
@@ -345,6 +346,41 @@ def test_planner_preview_remains_stable_across_state_changes():
     )
 
 
+def test_planner_preview_includes_upcoming_road_roll():
+    previewer = PlannerPreviewer()
+    drive_line = [(0.0, float(z)) for z in np.linspace(0.0, 400.0, 200)]
+    z_roll_start = 120.0
+    roll_length_m = 160.0
+    max_bank_rad = math.radians(8.0)
+
+    def cross_pitch_profile(s_value: float) -> float:
+        if s_value <= z_roll_start or s_value >= z_roll_start + roll_length_m:
+            return 0.0
+        t = (s_value - z_roll_start) / roll_length_m
+        if t <= 0.25:
+            return max_bank_rad * _smoothstep(t / 0.25)
+        if t <= 0.5:
+            return max_bank_rad * (1.0 - _smoothstep((t - 0.25) / 0.25))
+        if t <= 0.75:
+            return -max_bank_rad * _smoothstep((t - 0.5) / 0.25)
+        return -max_bank_rad * (1.0 - _smoothstep((t - 0.75) / 0.25))
+
+    plan = {
+        "cross_pitch": 0.0,
+        "cross_pitch_profile": cross_pitch_profile,
+        "cross_pitch_mode": "bank",
+    }
+    speed_limits = [{"start_s": 0.0, "end_s": float("inf"), "speed_mph": 40.0}]
+    previewer.set_plan(drive_line, speed_limits, plan)
+
+    preview = previewer.preview((0.0, 0.0, 160.0), 40.0 / MPS_TO_MPH, preview_hz=10.0)
+
+    assert preview.roll_lataccel
+    future_roll = np.array(preview.roll_lataccel, dtype=float)
+    assert np.max(future_roll) > 0.5
+    assert np.min(future_roll) < -0.5
+
+
 def _place_car_with_lateral_offset(env: Environment, center_x: float, offset_m: float) -> None:
     """Drop the car at the requested lateral offset relative to the driveline."""
 
@@ -567,7 +603,7 @@ def _run_s_curve_trial(
 
     mode = "eval" if VISUALIZE else "train"
     env = Environment(
-        {"flat": True, "dt": 1.0 / S_CURVE_PHYSICS_HZ, "substeps": 1, "sun_time_hours": 12.0},
+        {"flat": True, "dt": 1.0 / S_CURVE_PHYSICS_HZ, "substeps": 1, "sun_time_hours": 17.0},
         mode=mode,
     )
     env.reset()
@@ -599,7 +635,7 @@ def _run_s_curve_trial(
     }
     env.plan = plan
     env.rp = drive_line
-    env._planner.set_plan(drive_line, speed_limits)  # type: ignore[attr-defined]
+    env._planner.set_plan(drive_line, speed_limits, plan)  # type: ignore[attr-defined]
 
     if VISUALIZE:
         env.init_renderer()
@@ -793,6 +829,204 @@ def _run_s_curve_trial(
     )
 
 
+def _configure_banked_straight_drive_line(
+    env: Environment,
+    *,
+    target_speed_mph: float,
+    lane_width: float = 3.6,
+    lanes: int = 1,
+    shoulder: float = 1.5,
+    road_height: float = 1.0,
+    max_bank_deg: float = 8.0,
+    roll_length_m: float = 240.0,
+) -> tuple[float, float, float]:
+    """Install a straight target path over a smoothly banked road surface."""
+
+    assert env.terrain is not None
+    terrain = env.terrain
+    center_x = terrain.width * 0.5
+    z_roll_start = terrain.height * 0.25 + 80.0
+    z_roll_end = z_roll_start + roll_length_m
+    max_bank_rad = math.radians(max_bank_deg)
+
+    z_vals = np.linspace(0.0, terrain.height, 300)
+    drive_line = [(center_x, float(z)) for z in z_vals]
+    speed_limits = (
+        {"start_s": 0.0, "end_s": float("inf"), "speed_mph": target_speed_mph * 1.25},
+    )
+
+    def cross_pitch_profile(s_value: float) -> float:
+        if s_value <= z_roll_start or s_value >= z_roll_end:
+            return 0.0
+        t = (s_value - z_roll_start) / max(roll_length_m, 1e-6)
+        if t <= 0.25:
+            return max_bank_rad * _smoothstep(t / 0.25)
+        if t <= 0.5:
+            return max_bank_rad * (1.0 - _smoothstep((t - 0.25) / 0.25))
+        if t <= 0.75:
+            return -max_bank_rad * _smoothstep((t - 0.5) / 0.25)
+        return -max_bank_rad * (1.0 - _smoothstep((t - 0.75) / 0.25))
+
+    plan = {
+        "lane_width": lane_width,
+        "lanes": lanes,
+        "shoulder": shoulder,
+        "road_height": road_height,
+        "cross_pitch": 0.0,
+        "cross_pitch_profile": cross_pitch_profile,
+        "cross_pitch_mode": "bank",
+        "ditch_width": 0.0,
+        "ditch_depth": 0.0,
+        "road_friction": 1.0,
+        "drive_line": drive_line,
+        "speed_limits": speed_limits,
+    }
+    env.plan = plan
+    env.rp = drive_line
+    apply_plan(terrain, drive_line, plan)
+    env._planner.set_plan(drive_line, speed_limits, plan)  # type: ignore[attr-defined]
+    return center_x, z_roll_start, z_roll_end
+
+
+def _run_road_roll_trial(
+    label: str,
+    *,
+    target_speed_mph: float,
+    max_roll_error_m: float = 2.0,
+    controller_class=None,
+) -> tuple[bool, str]:
+    """Drive a straight road with left-then-right banking and check tracking."""
+
+    print(f"\n\n=== Road-roll trial: {label} ===")
+
+    mode = "eval" if VISUALIZE else "train"
+    env = Environment(
+        {"flat": True, "dt": 1.0 / S_CURVE_PHYSICS_HZ, "substeps": 1, "sun_time_hours": 12.0},
+        mode=mode,
+    )
+    env.reset()
+
+    assert env.terrain is not None
+    center_x, z_roll_start, z_roll_end = _configure_banked_straight_drive_line(
+        env,
+        target_speed_mph=target_speed_mph,
+    )
+    print(
+        f"  geometry: z_roll_start={z_roll_start:.0f} m, z_roll_end={z_roll_end:.0f} m, "
+        f"bank=left_then_right, control_hz={S_CURVE_CONTROL_HZ:.0f}, "
+        f"physics_hz={S_CURVE_PHYSICS_HZ:.0f}"
+    )
+
+    if VISUALIZE:
+        env.init_renderer()
+        ensure_drive_line_layer(env)
+
+    assert env.car is not None
+    initial_mps = target_speed_mph / MPS_TO_MPH
+    z0 = env.terrain.height * 0.25
+    y0 = env.terrain.get_height(center_x, z0) + env.car.cg_height_m
+    env.car.body.pos = np.array([center_x, y0, z0], dtype=float)
+    env.car.body.vel = np.array([0.0, 0.0, initial_mps], dtype=float)
+    env.car.body.angvel[:] = 0.0
+    env.car.body.rot.arr[:] = (1.0, 0.0, 0.0, 0.0)
+    env._prev_velocity = env.car.body.vel.copy()  # type: ignore[attr-defined]
+    env._refresh_initial_telemetry()  # type: ignore[attr-defined]
+
+    ctrl_cls = controller_class if controller_class is not None else PIDSteeringController
+    try:
+        controller = ctrl_cls(control_rate_hz=S_CURVE_CONTROL_HZ)
+    except TypeError:
+        controller = ctrl_cls()
+    env.attach_controller(controller)
+    controller.enable()
+
+    max_speed_mph = target_speed_mph + 10.0
+    throttle_cmd = 0.0
+    throttle_alpha = 0.25
+
+    max_time = 80.0
+    steps = int(math.ceil(max_time / env.dt))
+
+    roll_max_error = 0.0
+    exit_stable_time = 0.0
+    exit_stable_req = 5.0
+    exit_tol = 0.5
+    past_roll = False
+
+    def finalize(ok: bool, message: str) -> tuple[bool, str]:
+        env.attach_controller(None)
+        return ok, message
+
+    for _step_idx in range(steps):
+        assert env.car is not None
+        speed_mph = float(np.linalg.norm(env.car.body.vel)) * MPS_TO_MPH
+        car_z = float(env.car.body.pos[2])
+
+        speed_error = target_speed_mph - speed_mph
+        brake_cmd = 0.0
+        if speed_mph > max_speed_mph + 2.0:
+            desired_throttle = 0.0
+            brake_cmd = 0.25
+        elif speed_mph > max_speed_mph + 0.5:
+            desired_throttle = 0.0
+            brake_cmd = 0.10
+        elif speed_mph > target_speed_mph + 1.0:
+            desired_throttle = 0.0
+        elif speed_error > 5.0:
+            desired_throttle = 0.8
+        elif speed_error > 2.0:
+            desired_throttle = 0.6
+        elif speed_error > 0.5:
+            desired_throttle = 0.45
+        elif speed_error > -0.5:
+            desired_throttle = 0.10
+        else:
+            desired_throttle = 0.0
+        throttle_cmd += throttle_alpha * (desired_throttle - throttle_cmd)
+
+        _, _, terminated, truncated, _info = env.step(DriverCommand(throttle=throttle_cmd, brake=brake_cmd))
+        if terminated:
+            return finalize(False, f"{label}: car left terrain at z={car_z:.0f} m")
+        assert not truncated, "simulation truncated"
+
+        tele = env._build_snapshot(env._prev_velocity)  # type: ignore[attr-defined]
+        lat_error = float(tele.target.lateral_error)
+
+        if z_roll_start <= car_z <= z_roll_end:
+            roll_max_error = max(roll_max_error, abs(lat_error))
+            if roll_max_error > max_roll_error_m:
+                return finalize(
+                    False,
+                    f"{label}: roll_max_error exceeded {max_roll_error_m:.1f}m "
+                    f"({roll_max_error:.2f}m) at z={car_z:.0f}",
+                )
+
+        if car_z > z_roll_end:
+            past_roll = True
+            if abs(lat_error) <= exit_tol:
+                exit_stable_time += env.dt
+                if exit_stable_time >= exit_stable_req:
+                    return finalize(
+                        True,
+                        f"{label}: roll_max_error={roll_max_error:.2f} m, "
+                        f"settled ±{exit_tol} m on exit straight",
+                    )
+            else:
+                exit_stable_time = 0.0
+
+    if not past_roll:
+        return finalize(
+            False,
+            f"{label}: car never reached road-roll end (z_roll_end={z_roll_end:.0f} m)",
+        )
+    return finalize(
+        False,
+        f"{label}: roll_max_error={roll_max_error:.2f} m, "
+        f"did not settle ±{exit_tol} m for {exit_stable_req} s "
+        f"(exit_stable_time={exit_stable_time:.1f} s)",
+    )
+
+
 def _current_test_name() -> str:
     current = os.environ.get("PYTEST_CURRENT_TEST", "").strip()
     if not current:
@@ -932,6 +1166,30 @@ def test_pid_follows_s_curve():
     for direction, label, speed_mph, max_err in trials:
         ok, msg = _run_s_curve_trial(
             direction, label, max_s_error_m=max_err, target_speed_mph=speed_mph
+        )
+        print(f"  {label}: {'PASS' if ok else 'FAIL'} — {msg}")
+        if not ok:
+            failures.append(msg)
+
+    if failures:
+        pytest.fail("\n".join(failures))
+
+
+def test_pid_follows_road_roll():
+    """PID must hold a straight target through smooth left/right road roll."""
+
+    trials = [
+        ("road_roll_20mph", 20.0, 2.0),
+        ("road_roll_40mph", 40.0, 2.5),
+        ("road_roll_60mph", 60.0, 3.0),
+    ]
+    failures: list[str] = []
+
+    for label, speed_mph, max_err in trials:
+        ok, msg = _run_road_roll_trial(
+            label,
+            target_speed_mph=speed_mph,
+            max_roll_error_m=max_err,
         )
         print(f"  {label}: {'PASS' if ok else 'FAIL'} — {msg}")
         if not ok:

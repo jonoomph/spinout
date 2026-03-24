@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import math
-from typing import Iterable, List, Sequence, Tuple
+from typing import Any, Iterable, List, Sequence, Tuple
 
 import numpy as np
 
@@ -41,10 +41,16 @@ class PlannerPreviewer:
         self.tangents = np.zeros((0, 2), dtype=float)
         self.curvature = np.zeros(0, dtype=float)
         self.speed_limits: List[dict] = []
+        self.plan_meta: dict[str, Any] = {}
         self._last_projection: Tuple[float, float, float] | None = None
         self._last_index: int | None = None
 
-    def set_plan(self, drive_line: Sequence[Sequence[float]] | None, speed_limits: Iterable[dict] | None) -> None:
+    def set_plan(
+        self,
+        drive_line: Sequence[Sequence[float]] | None,
+        speed_limits: Iterable[dict] | None,
+        plan_meta: dict[str, Any] | None = None,
+    ) -> None:
         if not drive_line:
             self.control_positions = np.zeros((0, 2), dtype=float)
             self.positions = np.zeros((0, 2), dtype=float)
@@ -52,6 +58,7 @@ class PlannerPreviewer:
             self.tangents = np.zeros((0, 2), dtype=float)
             self.curvature = np.zeros(0, dtype=float)
             self.speed_limits = []
+            self.plan_meta = {}
             self._last_projection = None
             self._last_index = None
             return
@@ -67,6 +74,7 @@ class PlannerPreviewer:
         self.tangents = sampled_tangents
         self.curvature = self._compute_curvature(sampled)
         self.speed_limits = list(speed_limits or [])
+        self.plan_meta = dict(plan_meta or {})
         self._last_projection = None
         self._last_index = None
 
@@ -103,7 +111,7 @@ class PlannerPreviewer:
             kappa = self._curvature_at(cur_s)
             lat = target_speed * target_speed * kappa
             lat_list.append(float(lat))
-            roll_lat_list.append(0.0)  # Road banking is not yet modelled explicitly
+            roll_lat_list.append(float(self._road_roll_lataccel_at(cur_s)))
             speed_list.append(float(target_speed))
             long_accel = (target_speed - prev_speed) * hz
             long_list.append(float(long_accel))
@@ -142,6 +150,23 @@ class PlannerPreviewer:
                 heading_error=heading_error,
             )
         return PlannerTarget()
+
+    def _road_roll_lataccel_at(self, s_value: float) -> float:
+        cross_pitch = float(self.plan_meta.get("cross_pitch", 0.0))
+        profile = self.plan_meta.get("cross_pitch_profile")
+        if callable(profile):
+            angle = float(profile(float(s_value)))
+        elif profile:
+            angle = cross_pitch
+            for segment in profile:
+                start_s = float(segment.get("start_s", 0.0))
+                end_s = float(segment.get("end_s", float("inf")))
+                if start_s <= s_value <= end_s:
+                    angle = float(segment.get("cross_pitch", cross_pitch))
+                    break
+        else:
+            angle = cross_pitch
+        return 9.81 * math.sin(float(angle))
 
     # ------------------------------------------------------------------
 

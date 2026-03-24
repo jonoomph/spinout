@@ -29,12 +29,20 @@ class PIDGains:
       kp: steer per metre of effective lateral error
       ki: steer per metre-second of accumulated error
       kd: steer per metre/second of error rate
-      k_ff: steer per m/s^2 of planned lateral acceleration
+      k_ff: steer per m/s^2 of planned path lateral acceleration
+      k_roll: steer per m/s^2 of roll-lateral-accel tracking error
+      k_roll_ff: steer per m/s^2 of previewed upcoming road-roll lateral accel
+
+    Roll sign conventions:
+      positive roll_lataccel means the road/body roll induces leftward lateral
+      acceleration, so positive ``k_roll_ff`` adds left steer in anticipation.
     """
-    kp: float = 0.55
+    kp: float = 0.65
     ki: float = 0.005
-    kd: float = 0.35
+    kd: float = 0.25
     k_ff: float = 0.08
+    k_roll: float = 0.06
+    k_roll_ff: float = 0.06
     integral_limit: float = 0.25
 
 
@@ -104,6 +112,16 @@ class PIDSteeringController(BaseController):
         n = min(len(fut), max(1, round(preview_secs * preview_hz)))
         return float(np.mean(fut[:n]))
 
+    def _feedforward_roll_lat_accel(self, telemetry: TelemetrySnapshot) -> float:
+        fut = telemetry.future.roll_lataccel or ()
+        if not fut:
+            return telemetry.target.roll_lataccel
+
+        preview_secs = self._preview_seconds(telemetry.state.v_ego)
+        preview_hz = self.preview_rate_hz or 10.0
+        n = min(len(fut), max(1, round(preview_secs * preview_hz)))
+        return float(np.mean(fut[:n]))
+
     def _effective_lateral_error(self, telemetry: TelemetrySnapshot) -> float:
         return (
             telemetry.target.lateral_error
@@ -117,9 +135,13 @@ class PIDSteeringController(BaseController):
         dt = max(self.dt or 0.1, 1e-6)
 
         base = self._feedforward_lat_accel(telemetry)
-        ff = self.gains.k_ff * base
+        roll_ff_base = self._feedforward_roll_lat_accel(telemetry)
+        ff = self.gains.k_ff * base + self.gains.k_roll_ff * roll_ff_base
 
         e = self._effective_lateral_error(telemetry)
+        e += self.gains.k_roll * (
+            telemetry.state.roll_lataccel - telemetry.target.roll_lataccel
+        )
 
         de_dt = 0.0 if self._prev_eff_err is None else (e - self._prev_eff_err) / dt
         self._prev_eff_err = e

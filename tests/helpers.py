@@ -49,7 +49,7 @@ def configure_flat_drive_line(
     }
     env.plan = plan
     env.rp = drive_line
-    env._planner.set_plan(drive_line, speed_limits)  # type: ignore[attr-defined]
+    env._planner.set_plan(drive_line, speed_limits, plan)  # type: ignore[attr-defined]
     if getattr(env, "render_ctx", None):
         env._build_road_layers()  # type: ignore[attr-defined]
     return center_x

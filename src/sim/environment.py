@@ -369,7 +369,7 @@ class Environment:
             self.terrain.heights[:] = 0
             rp = None
             self.plan = {}
-            self._planner.set_plan(None, None)
+            self._planner.set_plan(None, None, None)
             self.buildings = {"vertices": np.zeros((0, 10), dtype="f4"), "instances": [], "palette": None, "noise_scale": 0.0}
             self.wind_system = WindSystem(self.rng, self.weather, self.precipitation, calm=True)
             self.wind_sample = self.wind_system.update(0.0)
@@ -436,6 +436,7 @@ class Environment:
             self._planner.set_plan(
                 self.plan.get("drive_line"),
                 self.plan.get("speed_limits"),
+                self.plan,
             )
             self.buildings = generate_buildings(self.terrain, rp, plan, rng=self.rng)
             self.wind_system = WindSystem(

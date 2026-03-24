@@ -105,9 +105,15 @@ def _road_surface_height(
     nrm2 = sample["nrm2"]
     terrain_y = base_height(c[0] + nrm2[0] * offset, c[1] + nrm2[1] * offset)
     center_surface = sample["center_surface"]
-    edge_height = center_surface - math.tan(cross_pitch) * half_road
-    deck_drop = math.tan(cross_pitch) * min(abs(offset), half_road)
-    deck_height = center_surface - deck_drop
+    cross_pitch_mode = str(sample.get("cross_pitch_mode", "crown"))
+    if cross_pitch_mode == "bank":
+        clamped_offset = float(np.clip(offset, -half_road, half_road))
+        deck_height = center_surface + math.tan(cross_pitch) * clamped_offset
+        edge_height = center_surface + math.tan(cross_pitch) * half_road * float(np.sign(offset or 1.0))
+    else:
+        edge_height = center_surface - math.tan(cross_pitch) * half_road
+        deck_drop = math.tan(cross_pitch) * min(abs(offset), half_road)
+        deck_height = center_surface - deck_drop
     if abs(offset) <= half_road:
         return deck_height + cfg.ROAD_EPS
 
@@ -145,6 +151,23 @@ def _road_surface_height(
     return float(min(height, cap_height))
 
 
+def _cross_pitch_at_s(
+    s_value: float,
+    cross_pitch: float,
+    cross_pitch_profile,
+) -> float:
+    if not cross_pitch_profile:
+        return float(cross_pitch)
+    if callable(cross_pitch_profile):
+        return float(cross_pitch_profile(float(s_value)))
+    for segment in cross_pitch_profile:
+        start_s = float(segment.get("start_s", 0.0))
+        end_s = float(segment.get("end_s", float("inf")))
+        if start_s <= s_value <= end_s:
+            return float(segment.get("cross_pitch", cross_pitch))
+    return float(cross_pitch)
+
+
 def _collect_profile(
     terrain,
     path_np: list[np.ndarray],
@@ -152,6 +175,8 @@ def _collect_profile(
     shoulder: float,
     road_height: float,
     cross_pitch: float,
+    cross_pitch_profile,
+    cross_pitch_mode: str,
     ditch_width: float,
     ditch_depth: float,
     along_step: float,
@@ -216,6 +241,8 @@ def _collect_profile(
                 "nrm2": nrm2,
                 "dir2": sample["dir2"],
                 "s": sample["s"],
+                "cross_pitch": _cross_pitch_at_s(sample["s"], cross_pitch, cross_pitch_profile),
+                "cross_pitch_mode": cross_pitch_mode,
             }
         )
 
@@ -252,7 +279,15 @@ def _collect_profile(
         info["center_surface"] = center_surface
         c = info["center"]
         nrm2 = info["nrm2"]
-        edge_height = center_surface - math.tan(cross_pitch) * half_road
+        sample_cross_pitch = float(info.get("cross_pitch", cross_pitch))
+        sample_cross_pitch_mode = str(info.get("cross_pitch_mode", cross_pitch_mode))
+        if sample_cross_pitch_mode == "bank":
+            edge_height = min(
+                center_surface + math.tan(sample_cross_pitch) * half_road,
+                center_surface - math.tan(sample_cross_pitch) * half_road,
+            )
+        else:
+            edge_height = center_surface - math.tan(sample_cross_pitch) * half_road
         start_height = edge_height - curb_height
         width_needed = _estimate_required_ditch_width(
             terrain,
@@ -279,6 +314,8 @@ def _collect_profile(
         "half_road": half_road,
         "shoulder": shoulder,
         "cross_pitch": cross_pitch,
+        "cross_pitch_profile": cross_pitch_profile,
+        "cross_pitch_mode": cross_pitch_mode,
         "along_step": along_step,
     }
 
@@ -293,6 +330,7 @@ class RoadSurface:
         self.shoulder = float(profile.get("shoulder", 0.0))
         self.curb_height = float(profile.get("curb_height", cfg.CURB_HEIGHT))
         self.cross_pitch = float(profile.get("cross_pitch", 0.0))
+        self.cross_pitch_mode = str(profile.get("cross_pitch_mode", "crown"))
         self.ditch_sigma = float(profile.get("ditch_sigma", cfg.DITCH_SIGMA_MIN))
         self.search_radius = max(float(profile.get("along_step", 0.5)) * 1.6, 1.5)
         offsets = profile.get("offsets", [0.0])
@@ -378,7 +416,7 @@ class RoadSurface:
                     self.half_road,
                     self.shoulder,
                     self.curb_height,
-                    self.cross_pitch,
+                    float(info.get("cross_pitch", self.cross_pitch)),
                     self.ditch_sigma,
                     info["ditch_width"],
                 )
@@ -543,6 +581,8 @@ def build_road_vertices(
     shoulder: float,
     road_height: float,
     cross_pitch: float,
+    cross_pitch_profile=None,
+    cross_pitch_mode: str = "crown",
     ditch_width: Optional[float] = None,
     ditch_depth: Optional[float] = None,
     road_color=cfg.ROAD_COL,
@@ -584,6 +624,8 @@ def build_road_vertices(
         shoulder,
         road_height,
         cross_pitch,
+        cross_pitch_profile,
+        cross_pitch_mode,
         ditch_width,
         ditch_depth,
         along_step,
@@ -638,7 +680,7 @@ def build_road_vertices(
                 half_road,
                 shoulder,
                 curb_height,
-                cross_pitch,
+                float(info.get("cross_pitch", cross_pitch)),
                 ditch_sigma,
                 info["ditch_width"],
             )
@@ -957,6 +999,8 @@ def apply_plan(terrain, path: List[Tuple[float, float]], params: dict, rng: Opti
     shoulder = params.get("shoulder", 0.0)
     road_height = float(params.get("road_height", 0.0))
     cross_pitch = float(params.get("cross_pitch", 0.0))
+    cross_pitch_profile = params.get("cross_pitch_profile")
+    cross_pitch_mode = str(params.get("cross_pitch_mode", "crown"))
     ditch_width = float(params.get("ditch_width", cfg.DITCH_WIDTH_MAX))
     ditch_depth = float(params.get("ditch_depth", cfg.DITCH_DEPTH_MIN))
 
@@ -986,6 +1030,8 @@ def apply_plan(terrain, path: List[Tuple[float, float]], params: dict, rng: Opti
         shoulder,
         road_height,
         cross_pitch,
+        cross_pitch_profile,
+        cross_pitch_mode,
         ditch_width,
         ditch_depth,
         along_step,

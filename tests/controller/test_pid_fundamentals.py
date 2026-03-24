@@ -84,7 +84,7 @@ def _install_arc_drive_line(
         "speed_limits": speed_limits,
     }
     env.rp = drive_line
-    env._planner.set_plan(drive_line, speed_limits)  # type: ignore[attr-defined]
+    env._planner.set_plan(drive_line, speed_limits, env.plan)  # type: ignore[attr-defined]
 
 
 def _place_car_on_path(env: Environment, x: float, z: float, speed_mps: float, yaw_rad: float = 0.0) -> None:
