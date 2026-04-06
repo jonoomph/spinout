@@ -1230,8 +1230,9 @@ class RenderContext:
     def render_car_model(self, vertices, mvp):
         """Draw either wireframe or textured model using explicit VAO layouts."""
         tri_vertices, edge_vertices = vertices
+        was_wire = self.ctx.wireframe
 
-        if self.ctx.wireframe:
+        if was_wire:
             if not edge_vertices:
                 return
             edge_array = np.asarray(edge_vertices, 'f4')
@@ -1282,8 +1283,11 @@ class RenderContext:
         if self.car_model_tex:
             self.car_model_tex.use(0)
             self.prog_tex['tex'] = 0
-        self.model_vao.render(moderngl.TRIANGLES)
-        self.ctx.wireframe = was_wire
+        self.ctx.wireframe = False
+        try:
+            self.model_vao.render(moderngl.TRIANGLES)
+        finally:
+            self.ctx.wireframe = was_wire
 
     def render_debug_lines(self, vertices, mvp):
         """Render simple debug lines (pos/color) using the generic program."""
